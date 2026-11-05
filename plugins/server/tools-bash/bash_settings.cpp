@@ -51,7 +51,7 @@ BashSettings ParseBashSettings(const nlohmann::json& config) {
         reader.Int("max_background_tasks", settings.max_background_tasks, 1,
                    std::numeric_limits<int>::max()));
     settings.memory_max_percent = static_cast<int>(
-        reader.Int("memory_max_percent", settings.memory_max_percent, 0, 100));
+        reader.Int("memory_max_percent", settings.memory_max_percent, 0, common::kWholePercent));
     settings.shell = reader.String("shell", settings.shell, /*allow_empty=*/false);
     // A typo'd mode must not silently mean "allowlist" (or worse, "all").
     settings.inherit_env = reader.Enum("inherit_env", settings.inherit_env, {"allowlist", "all"});

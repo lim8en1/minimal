@@ -35,6 +35,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The stock image leaves ~14 GB free; a cold vcpkg build (grpc and
+      # friends) plus the build tree exhausts it and the runner itself dies
+      # mid-Configure. Preinstalled toolchains this build never uses go first.
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force > /dev/null || true
+          df -h /
+
       - name: Install tools (Linux)
         if: runner.os == 'Linux'
         run: |

@@ -17,6 +17,9 @@ inline constexpr std::size_t kKiB = std::size_t{1} << 10;
 inline constexpr std::size_t kMiB = std::size_t{1} << 20;
 inline constexpr std::size_t kGiB = std::size_t{1} << 30;
 
+// The whole, in percent: the upper bound of a percentage setting.
+inline constexpr int kWholePercent = 100;
+
 // `percent` percent of `total`, rounding toward zero.
 constexpr std::int64_t PercentOf(std::int64_t total, std::int64_t percent) {
     return total * percent / 100;

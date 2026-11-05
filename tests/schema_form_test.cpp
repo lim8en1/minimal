@@ -725,9 +725,11 @@ TEST_CASE("config-view: filters ignore case; reopening keeps the form and the se
     REQUIRE(Eventually([&] { return !view.feed().form().describe.is_null(); }));
     (void)minimal_test::RenderFrame(component, 100, 30);
     minimal_test::SendEvent(component, ftxui::Event::ArrowDown);   // mode
+    // Read BEFORE OnShow: the reopen it starts is asynchronous, and one that
+    // lands before a later read leaves nothing for the wait below to see.
+    const auto generation = view.feed().form().generation;
     view.OnShow();                                                 // the view shown again
     CHECK_FALSE(view.feed().form().describe.is_null());            // no "loading" flash
-    const auto generation = view.feed().form().generation;
     REQUIRE(Eventually([&] { return view.feed().form().generation > generation; }));
     const std::string frame = minimal_test::RenderFrame(component, 100, 30);
     CHECK(frame.find("enter: choose") != std::string::npos);   // still on mode (an enum)

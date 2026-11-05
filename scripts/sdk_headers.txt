@@ -98,6 +98,7 @@ minimal/llm/json_depth.hpp
 minimal/session/ulid.hpp
 minimal/sidecar/capped_buffer.hpp
 minimal/sidecar/drain.hpp
+minimal/sidecar/memory_scope.hpp
 minimal/sidecar/policy.hpp
 minimal/sidecar/process.hpp
 minimal/sidecar/task_registry.hpp

@@ -27,7 +27,11 @@ tools::ToolContext ContextWithBroker(
 }
 
 // A broker that answers with these per-question slots.
-tools::ToolContext Answering(nlohmann::json answers) {
+// A vector, not a json: `json answers = {Slot(...)}` with ONE element is a
+// copy of the slot under some compilers (AppleClang 17) and a one-element
+// array under others -- the single-answer cases read as "dismissed" on CI.
+tools::ToolContext Answering(const std::vector<nlohmann::json>& slots) {
+    const nlohmann::json answers(slots);
     return ContextWithBroker([answers](const tools::PromptRequest&) {
         return tools::PromptResult{tools::PromptOutcome::Answered,
                                    nlohmann::json{{"answers", answers}}};

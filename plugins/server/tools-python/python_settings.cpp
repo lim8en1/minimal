@@ -47,7 +47,7 @@ PythonSettings ParsePythonSettings(const nlohmann::json& config) {
     settings.max_file_size_bytes =
         reader.Int("max_file_size_bytes", settings.max_file_size_bytes, 1);
     settings.memory_max_percent = static_cast<int>(
-        reader.Int("memory_max_percent", settings.memory_max_percent, 0, 100));
+        reader.Int("memory_max_percent", settings.memory_max_percent, 0, common::kWholePercent));
     settings.stream_head_bytes = reader.Int("stream_head_bytes", settings.stream_head_bytes, 1);
     settings.stream_tail_bytes = reader.Int("stream_tail_bytes", settings.stream_tail_bytes, 1);
     reader.Finish();

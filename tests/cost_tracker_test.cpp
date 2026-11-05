@@ -1226,9 +1226,10 @@ TEST_CASE("rate sources are fetched concurrently, not sequentially",
           "[cost_tracker]") {
     // Every loopback server sleeps 300ms before answering. Sequential fetches
     // (the pre-fix shape) would take >=600ms end to end; concurrent fetches
-    // take ~300ms plus overhead. The threshold is set well below 2x the
-    // per-source delay to tolerate scheduling jitter while still failing
-    // clearly if the two GETs ever go back to running one after the other.
+    // take ~300ms plus overhead. Three sources run sequentially would take
+    // >=900ms; the 2x threshold leaves a loaded CI runner room for jitter
+    // (1.5x failed there by 2ms) while still failing clearly if the GETs
+    // ever go back to running one after the other.
     Harness harness;
     RateSources sources;
     RateTable rates(sources, &harness.storage);
@@ -1256,7 +1257,7 @@ TEST_CASE("rate sources are fetched concurrently, not sequentially",
     CHECK(outcome.ok);
     CHECK(outcome.updated == 3);
     for (const auto& source : outcome.sources) CHECK(source.updated == 1);
-    CHECK(elapsed < kDelay * 3 / 2);  // well under 2x kDelay's sequential-sum shape
+    CHECK(elapsed < kDelay * 2);  // well under the 3x sequential sum
 }
 
 TEST_CASE("a rate source's api_key is sent as a bearer; an unkeyed one sends none",
