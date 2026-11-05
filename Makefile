@@ -58,9 +58,16 @@ build-tests:
 	cmake --build --preset $(PRESET) $(TEST_TARGETS)
 
 # sudo installs would seed root's home (SeedConfig.cmake resolves $HOME);
-# redirect seeding to the invoking user's config dir instead. An explicit
+# redirect seeding to the invoking user's config dir instead (SeedConfig.cmake
+# hands what it writes there back to them), and give back the build tree's
+# install_manifest.txt, which a root install leaves root-owned. An explicit
 # MINIMAL_CONFIG_DIR in the environment always wins.
 install: 
+	@if [ -n "$${SUDO_USER:-}" ] && [ ! -f $(BUILD_DIR)/CMakeCache.txt ]; then \
+		echo "install: $(BUILD_DIR)/ is not built; run 'make' as $$SUDO_USER first," \
+		     "then 'sudo make install' (configuring as root leaves a root-owned build tree)"; \
+		exit 1; \
+	fi
 	$(ensure-configured)
 	@if [ -n "$${SUDO_USER:-}" ] && [ -z "$${MINIMAL_CONFIG_DIR:-}" ]; then \
 		h=$$(eval echo ~$$SUDO_USER 2>/dev/null || true); \
@@ -69,7 +76,9 @@ install:
 		fi; \
 		if [ -n "$$h" ] && [ -d "$$h" ]; then \
 			echo "install: seeding $$SUDO_USER's config ($$h/.config/minimal), not root's"; \
-			MINIMAL_CONFIG_DIR="$$h/.config/minimal" cmake --install $(BUILD_DIR) --prefix $(PREFIX); \
+			MINIMAL_CONFIG_DIR="$$h/.config/minimal" cmake --install $(BUILD_DIR) --prefix $(PREFIX) && \
+			{ [ ! -e $(BUILD_DIR)/install_manifest.txt ] || \
+			  chown "$$SUDO_UID:$$SUDO_GID" $(BUILD_DIR)/install_manifest.txt; }; \
 		else \
 			echo "install: could not resolve $$SUDO_USER's home; seeding as the running user"; \
 			cmake --install $(BUILD_DIR) --prefix $(PREFIX); \

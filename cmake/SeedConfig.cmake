@@ -102,6 +102,39 @@ endif()
 
 message(STATUS "minimal: ${MINIMAL_SEED_MODE} config in ${_config_dir}")
 
+# --- Ownership under sudo ----------------------------------------------------
+# `sudo make install` seeds the INVOKING user's config dir (the Makefile points
+# MINIMAL_CONFIG_DIR there), but everything written here would be root-owned
+# and uneditable by that user. When running as root on behalf of a sudo user
+# who owns the nearest existing ancestor of the config dir, every path written
+# below -- and every directory created on the way to it -- is handed back to
+# them. A root-owned target (a deliberate system-wide config) is left alone.
+set(_chown_to "")
+set(_chown_paths "")
+if(_writes AND NOT "$ENV{SUDO_UID}" STREQUAL "" AND NOT "$ENV{SUDO_UID}" STREQUAL "0"
+   AND NOT "$ENV{SUDO_GID}" STREQUAL "")
+    execute_process(COMMAND id -u OUTPUT_VARIABLE _uid OUTPUT_STRIP_TRAILING_WHITESPACE
+                    RESULT_VARIABLE _rc)
+    if(_rc EQUAL 0 AND _uid STREQUAL "0")
+        set(_anchor "${_config_dir}")
+        while(NOT EXISTS "${_anchor}")
+            list(APPEND _chown_paths "${_anchor}")   # created by the writes below
+            get_filename_component(_anchor "${_anchor}" DIRECTORY)
+        endwhile()
+        if(APPLE)
+            set(_stat_uid stat -f %u)
+        else()
+            set(_stat_uid stat -c %u)
+        endif()
+        execute_process(COMMAND ${_stat_uid} "${_anchor}" OUTPUT_VARIABLE _anchor_uid
+                        OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _rc)
+        if(_rc EQUAL 0 AND _anchor_uid STREQUAL "$ENV{SUDO_UID}")
+            set(_chown_to "$ENV{SUDO_UID}:$ENV{SUDO_GID}")
+            list(APPEND _chown_paths "${_config_dir}")
+        endif()
+    endif()
+endif()
+
 # --- The seed record ---------------------------------------------------------
 # Loaded into _rec_<relpath> variables. A line that does not parse is dropped:
 # the record is a convenience, and losing an entry only costs the "untouched"
@@ -148,6 +181,12 @@ foreach(_rel IN LISTS _bundled)
             get_filename_component(_dst_dir "${_dst}" DIRECTORY)
             file(MAKE_DIRECTORY "${_dst_dir}")
             file(COPY_FILE "${_src}" "${_dst}")
+            list(APPEND _chown_paths "${_dst}")
+            # The subdirectories on the way (agents/, prompts/, ...).
+            while(NOT _dst_dir STREQUAL _config_dir)
+                list(APPEND _chown_paths "${_dst_dir}")
+                get_filename_component(_dst_dir "${_dst_dir}" DIRECTORY)
+            endwhile()
         endif()
         set("_rec_${_rel}" "${_b}")
         list(APPEND _current "${_rel}")
@@ -168,6 +207,7 @@ foreach(_rel IN LISTS _bundled)
         list(APPEND _updated "${_rel}")
         if(MINIMAL_SEED_MODE STREQUAL "update")
             file(COPY_FILE "${_src}" "${_dst}")
+            list(APPEND _chown_paths "${_dst}")
             set("_rec_${_rel}" "${_b}")
         endif()
         continue()
@@ -176,6 +216,7 @@ foreach(_rel IN LISTS _bundled)
     list(APPEND _offered "${_rel}")
     if(MINIMAL_SEED_MODE STREQUAL "update")
         file(COPY_FILE "${_src}" "${_dst}${_new_suffix}")
+        list(APPEND _chown_paths "${_dst}${_new_suffix}")
         set("_rec_${_rel}" "${_b}")      # offered once; quiet until it changes again
     endif()
 endforeach()
@@ -198,6 +239,17 @@ if(_writes)
     endforeach()
     file(MAKE_DIRECTORY "${_config_dir}")
     file(WRITE "${_record}" "${_out}")
+    list(APPEND _chown_paths "${_record}")
+endif()
+
+if(NOT _chown_to STREQUAL "" AND _chown_paths)
+    list(REMOVE_DUPLICATES _chown_paths)
+    # -h: a symlink is re-owned itself, never followed out of the config dir.
+    execute_process(COMMAND chown -h "${_chown_to}" ${_chown_paths} RESULT_VARIABLE _rc)
+    if(NOT _rc EQUAL 0)
+        message(WARNING "minimal: could not hand the seeded config back to "
+                        "uid ${_chown_to}; fix with: sudo chown -R ${_chown_to} ${_config_dir}")
+    endif()
 endif()
 
 # --- Report ------------------------------------------------------------------
