@@ -1,6 +1,6 @@
 # minimal — Architecture
 
-Local-first, memory/CPU-efficient coding-agent harness. C++ server/TUI-client split over gRPC. Distributed to a team and public on GitHub — not a single-user personal tool, which shapes the decisions marked *(distribution)* below.
+Local-first, memory/CPU-efficient, extensible plugin-based agent harness (general-purpose; the bundled plugins make a coding agent). C++ server/TUI-client split over gRPC. Distributed to a team and public on GitHub — not a single-user personal tool, which shapes the decisions marked *(distribution)* below.
 
 **Product philosophy: build-it-yourself, customize-as-much-as-you-want.** Core owns *mechanisms* and the minimum default needed to function; nearly everything interesting ships as a **plugin using the same shape a third-party plugin would**. Read/write/edit/bash, the OpenAI provider, and the built-in commands are all bundled plugins, not privileged code paths.
 

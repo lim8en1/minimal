@@ -1,26 +1,54 @@
 # minimal
 
-A coding-agent harness — the program that runs the LLM turn loop, tools,
-sessions, and provider calls around a model — built to be light on CPU and RAM
-and to be taken apart: nearly everything is a plugin you can reconfigure,
-rename, replace, or remove.
+An extensible, plugin-based agent harness: the program around a model that
+runs the turn loop, sessions, tools and provider calls. It is general-purpose
+-- what an agent can do, and what it looks like while doing it, is decided by
+the plugins you load, not by the core.
 
-It is a C++ **server** that owns the turn loop, tools, sessions, and provider
-dispatch, and a C++/FTXUI **terminal client** that renders it — plus a
-headless one-turn mode (`minimal -p`) over the same gRPC interface.
+The core is deliberately small. It owns the mechanisms: the turn loop,
+sessions and their SQLite store, the permission gate, compaction triggering,
+subagents, and the gRPC protocol between server and client. Everything else
+is a plugin built against the same ABI a third-party plugin uses -- the tools,
+the model providers, the `/`-commands, memory, cost tracking, and on the
+client side even the chat surface, the prompt editor and the widget kit.
+Disable what you don't want, rename what you keep, replace any of it, add
+your own.
 
-- **Light.** A native C++ server and client. The running server uses about
-  25 MiB of RAM, versus roughly 1 GiB per opencode instance and ~300 MiB for Claude
-  Code, at about a quarter of opencode's CPU usage (informal measurements on
-  the author's machine). Built for long conversations: 512k–1M token histories
-  without holding or re-rendering full history; compaction is triggered from
-  context occupancy and streamed incrementally.
-- **Plugin-first.** Read/write/edit/bash, the model providers, and even the
-  built-in `/`-commands are bundled plugins using the same ABI a third-party
-  plugin would. Core owns mechanisms, you own the config: disable what you
-  don't want, alias what you do, add your own.
-- **Local and single-user.** One server per machine, one binary per client;
-  sessions persist in SQLite and survive client disconnects.
+The bundled set happens to make a capable coding agent (file, search, shell
+and Python tools, coding-oriented agent presets), but that is one
+configuration, not the product: swap the tools and presets and the same
+harness runs a research agent, an ops assistant, or something else.
+
+- **Plugin-first.** ~20 server extension points (tools, dynamic tool sources
+  such as MCP, providers and model catalogs, commands, agent preset
+  extensions, context contributors, compaction strategies, permission models
+  and advisors, hook points, cross-plugin services) and ~15 client ones
+  (views, renderers, status segments, the chat surface, prompt editor and
+  widget kit). Each plugin owns its config file, its permission policy and
+  its slice of the UI.
+- **Tweakable all the way down.** Most of what is a hard-coded choice
+  elsewhere is configuration here:
+  - Compaction is a pluggable strategy, chosen globally or per agent preset.
+    Its instructions are plain prompt files you edit (`prompts/compression.md`,
+    `prompts/compression-structured.md`).
+  - The system and subagent prompts are markdown files in the config dir, and
+    so are the agent presets.
+  - Tools can be renamed through aliases, or replaced outright: disable the
+    bundled plugin and load your own of the same name.
+  - Most capabilities can be switched off: a whole plugin in `plugins.json`,
+    a single tool per agent preset (`allowed_tools`), or refused everywhere
+    by a `deny` rule in `permissions.json`.
+- **Light.** A native C++ server and client. The running server uses tens of
+  MiB of RAM (about 25 MiB typical), versus roughly 1 GiB per opencode
+  instance and ~300 MiB for Claude Code, at about a quarter of opencode's CPU
+  usage (informal measurements on the author's machine). Built for long
+  conversations: 512k–1M token histories without holding or re-rendering full
+  history; compaction is triggered from context occupancy and streamed
+  incrementally.
+- **Local and single-user.** One server per machine, shared by every client;
+  sessions persist in SQLite and survive client disconnects. Clients are a
+  C++/FTXUI terminal UI and a headless one-turn mode (`minimal -p`) over the
+  same gRPC interface.
 
 Architecture and design decisions: [ARCHITECTURE.md](ARCHITECTURE.md) ·
 Extensibility: [docs/EXTENSIBILITY.md](docs/EXTENSIBILITY.md) ·
@@ -108,19 +136,31 @@ prompts, skills, and commands: **[examples/](examples/)**.
 
 ## Plugins
 
-Everything interesting ships as a plugin: `tools-fs`, `tools-search`,
-`tools-bash`, `tools-python`, `tools-web`, `tool-ask`, `provider-openai`,
-`provider-anthropic`, `commands-core`, `commands-md`, `checklist`,
-`signals-message`, `cost-tracker`, `memory`, `session-titler`,
-`decision-advisor` (server), and `logo`, `cost-view`, `checklist-view`
-(client). `session-titler` and `decision-advisor` ship disabled;
-`decision-advisor` sends tool input to a decision-model endpoint to auto-answer
-permission prompts, so enabling it takes three deliberate edits (see its
-[README](plugins/server/decision-advisor/README.md)). Drop your own
-into `<config>/plugins/`, enable/disable any plugin in `plugins.json`,
-configure it in `plugins.d/<name>.json`, and rename tools/commands via
-`plugins.json`'s `"aliases"` map — see
-**[docs/PLUGINS.md](docs/PLUGINS.md)**.
+What ships in the box, every piece of it removable or replaceable:
+
+| | Server plugins |
+|---|---|
+| Tools | `tools-fs` (read/write/edit), `tools-search` (grep/glob), `tools-bash`, `tools-python` (persistent interpreter), `tools-web` (fetch/search), `tool-ask` (structured questions to the user), `checklist`, `signals-message` (cross-session messaging), `mcp` (MCP servers as dynamic tools) |
+| Models | `provider-openai`, `provider-anthropic` |
+| Agent behavior | `skills`, `memory`, `project-context` (AGENTS.md/CLAUDE.md), `compaction-structured`, `decision-advisor`\*, `session-titler`\* |
+| Commands | `commands-core` (the built-in `/`-commands), `commands-md` (markdown `/`-commands) |
+| Other | `cost-tracker`, `opencode-compat` (reads an existing opencode setup) |
+
+| | Client plugins |
+|---|---|
+| The TUI itself | `chat-view`, `chat-renderers`, `prompt-editor`, `ui-kit`, `markdown-md4c`, `syntax-grammars`, `tab-bar`, `session-status`, `consent-prompts` |
+| Views and pickers | `tools-panel`, `session-view`, `selection-view`, `config-view`, `theme-view`, `help-view`, `session-export`, `logo` |
+| Halves of server plugins | `ask-view`, `checklist-view`, `cost-view`, `mcp-view` |
+
+\* Ships disabled. `decision-advisor` sends tool input to a decision-model
+endpoint to auto-answer permission prompts, so enabling it takes three
+deliberate edits (see its [README](plugins/server/decision-advisor/README.md)).
+
+Drop your own into `<config>/plugins/`, enable/disable any plugin in
+`plugins.json` (`client-plugins.json` for the client), configure it in
+`plugins.d/<name>.json`, and rename tools/commands via `plugins.json`'s
+`"aliases"` map — see **[docs/PLUGINS.md](docs/PLUGINS.md)**; the full
+extension surface is in **[docs/EXTENSIBILITY.md](docs/EXTENSIBILITY.md)**.
 
 Markdown-defined `/`-commands work zero-copy with opencode's layout: put
 `.md` files in the project's `commands/` or `.opencode/commands/`, or the

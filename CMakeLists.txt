@@ -110,7 +110,7 @@ endif()
 
 project(minimal
     VERSION 1.0.1
-    DESCRIPTION "Local-first coding-agent harness"
+    DESCRIPTION "Extensible, plugin-based agent harness"
     LANGUAGES C CXX)  # C for the vendored tree-sitter grammar sources
 
 # Beta marker appended to the user-visible version string (MINIMAL_VERSION).
