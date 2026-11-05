@@ -1979,9 +1979,18 @@ TEST_CASE("a request larger than the pipe buffer queues without blocking Submit"
     REQUIRE(id.has_value());
     CHECK(ahead == 1);
 
-    const auto baseline = interp->Progress();
-    interp->SoftInterrupt();
-    interp->WaitForInterrupt(baseline, std::chrono::seconds(5), nullptr);
+    // Interrupt the sleep until it is the sleep that answers: under load the
+    // driver may not have read it yet, and a SIGINT landing while it is idle
+    // is (correctly) spent as an idle interrupt, leaving the 30 s sleep to
+    // run ahead of the big request.
+    auto reaction = Interpreter::InterruptOutcome::kNoReaction;
+    for (int attempt = 0; attempt < 20 && reaction != Interpreter::InterruptOutcome::kResponse;
+         ++attempt) {
+        const auto baseline = interp->Progress();
+        interp->SoftInterrupt();
+        reaction = interp->WaitForInterrupt(baseline, std::chrono::seconds(5), nullptr);
+    }
+    REQUIRE(reaction == Interpreter::InterruptOutcome::kResponse);
     RequestOutcome outcome;
     REQUIRE(interp->WaitSync(*id, nullptr,
                              std::chrono::steady_clock::now() + std::chrono::seconds(10),

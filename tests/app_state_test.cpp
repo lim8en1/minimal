@@ -228,9 +228,14 @@ std::string SessionIdOf(AppState& app, const std::string& tab_id) {
 // Polls a tab's snapshot until `pred` is true or the deadline trips. AppState is
 // updated from a reader thread, so tests must wait rather than assert immediately.
 // Keyed by TAB id: the tab handle is the only identity a sessionless tab has.
+// Generous: each wait returns as soon as its predicate holds, so the bound only
+// matters for a failure -- and 5s flaked under a loaded parallel ctest (a CI
+// runner, -j16 locally), where an in-process turn round trip can take seconds.
+constexpr auto kWaitTimeout = std::chrono::seconds(15);
+
 template <typename Pred>
 bool WaitFor(AppState& app, const std::string& tab_id, Pred pred,
-             std::chrono::milliseconds timeout = 5s) {
+             std::chrono::milliseconds timeout = kWaitTimeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         for (const auto& tab : app.GetAllTabs()) {
@@ -244,7 +249,7 @@ bool WaitFor(AppState& app, const std::string& tab_id, Pred pred,
 // Waits until the tab's session exists (the first SubmitChatTurn's
 // EnsureSession round trip resolved).
 bool WaitForSession(AppState& app, const std::string& tab_id,
-                    std::chrono::milliseconds timeout = 5s) {
+                    std::chrono::milliseconds timeout = kWaitTimeout) {
     return WaitFor(app, tab_id, [](const AppState::TabSnapshot& t) { return t.has_session; },
                    timeout);
 }
@@ -929,7 +934,7 @@ TEST_CASE("SessionClient::GetMessages feeds ApplyScrollbackPage with real wire d
 // TAB-keyed (a sessionless tab has no session id to key by).
 template <typename Pred>
 bool WaitForDetails(AppState& app, const std::string& tab_id, Pred pred,
-                    std::chrono::milliseconds timeout = 5s) {
+                    std::chrono::milliseconds timeout = kWaitTimeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         if (pred(app.GetDetails(tab_id))) return true;
@@ -945,7 +950,7 @@ bool WaitForDetails(AppState& app, const std::string& tab_id, Pred pred,
 // terminating a session the stream never attached to answers the bidi with
 // NOT_FOUND, which is the attach-refusal path, not a clean end.
 bool WaitForAttached(AppState& app, const std::string& tab_id,
-                     std::chrono::milliseconds timeout = 5s) {
+                     std::chrono::milliseconds timeout = kWaitTimeout) {
     return WaitForDetails(app, tab_id, [](const SessionState::Snapshot& s) {
         return !s.agent_preset.empty();
     }, timeout);

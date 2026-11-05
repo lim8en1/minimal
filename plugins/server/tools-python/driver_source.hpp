@@ -184,10 +184,18 @@ def _main():
     emit({"ready": True, "version": sys.version.split()[0], "executable": sys.executable})
 
     while True:
-        if _st["pending"]:
-            _st["pending"] = False
-            emit({"idle_interrupted": True})
-        _st["mode"] = _IDLE
+        # Spend a remembered SIGINT in BOOK (a signal during the emit only
+        # sets pending), then enter IDLE -- and look again: one that landed
+        # between the check and the switch was only remembered, and the read
+        # below would sit on it until the next request.
+        while True:
+            if _st["pending"]:
+                _st["pending"] = False
+                emit({"idle_interrupted": True})
+            _st["mode"] = _IDLE
+            if not _st["pending"]:
+                break
+            _st["mode"] = _BOOK
         line = proto_in.readline()
         _st["mode"] = _BOOK
         if not line:
