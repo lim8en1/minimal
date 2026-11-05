@@ -120,7 +120,16 @@ public:
             {"scope",
              {{"type", "string"},
               {"enum", {"project", "global"}},
-              {"description", "project = this project, global = everywhere"}}}};
+              // The one line the model decides scope from: without a rule and
+              // a default, "everywhere" read as the safe choice and project
+              // facts leaked into every other project's index.
+              {"description",
+               "project: anything about or depending on the current project -- its "
+               "content, conventions, commands, decisions, people, state of work. "
+               "global: only what holds wherever the user works -- their own "
+               "preferences, facts about them, know-how not tied to any one project. "
+               "If it names or depends on this project, it is project. When unsure, "
+               "project."}}}};
         if (inline_ok) properties["body"] = {{"type", "string"}};
         spec_.definition.input_schema = {
             {"type", "object"}, {"properties", properties}, {"required", {"scope"}}};
