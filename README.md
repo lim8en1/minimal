@@ -39,12 +39,9 @@ harness runs a research agent, an ops assistant, or something else.
     a single tool per agent preset (`allowed_tools`), or refused everywhere
     by a `deny` rule in `permissions.json`.
 - **Light.** A native C++ server and client. The running server uses tens of
-  MiB of RAM (about 25 MiB typical), versus roughly 1 GiB per opencode
-  instance and ~300 MiB for Claude Code, at about a quarter of opencode's CPU
-  usage (informal measurements on the author's machine). Built for long
-  conversations: 512k–1M token histories without holding or re-rendering full
-  history; compaction is triggered from context occupancy and streamed
-  incrementally.
+  MiB of RAM (about 25 MiB typical). Built for long conversations: 512k–1M
+  token histories without holding or re-rendering full history; compaction is
+  triggered from context occupancy and streamed incrementally.
 - **Local and single-user.** One server per machine, shared by every client;
   sessions persist in SQLite and survive client disconnects. Clients are a
   C++/FTXUI terminal UI and a headless one-turn mode (`minimal -p`) over the
@@ -80,13 +77,13 @@ seeding): **[BUILD.md](BUILD.md)**.
 
 | Flag | Description |
 |---|---|
-| `-p, --print PROMPT` | headless one turn; a prompt starting with `/` runs a command |
+| `-p, --print PROMPT` | headless one turn; a prompt starting with `/` runs a command; `-p -` reads the prompt from stdin |
 | `--resume SESSION_ID` | open a stored session: attach to it in the TUI (or run one headless turn with `-p`); it keeps its stored preset and project_root |
 | `--list-sessions` | list stored sessions for the current project (`--all-dirs` for every project); `--output-format json` prints the same list for scripts |
 | `--server TARGET` | socket path or gRPC target (default `unix://<data dir>/server.sock`) |
 | `--agent PRESET` | agent preset (file stem of `agents/<name>.md`); with `--resume` it applies to the resumed turn only (requires `-p`) |
 | `--model P/M` | model as `<provider>/<model>` (overrides preset and settings) |
-| `--output-format text\|jsonl` | headless output format (`json` is a `--list-sessions` listing) |
+| `--output-format text\|jsonl\|result` | headless output format; `result` prints only the turn's structured result (a node preset's `submit_result`) and exits 6 without one (`json` is a `--list-sessions` listing) |
 | `--signals LIST` | comma-separated signals to receive (requires `-p`) |
 | `--dangerously-bypass` | auto-approve permission prompts (configured denies still apply) |
 | `--no-autospawn` | never start a server; fail if none is reachable |
@@ -142,7 +139,7 @@ What ships in the box, every piece of it removable or replaceable:
 |---|---|
 | Tools | `tools-fs` (read/write/edit), `tools-search` (grep/glob), `tools-bash`, `tools-python` (persistent interpreter), `tools-web` (fetch/search), `tool-ask` (structured questions to the user), `checklist`, `signals-message` (cross-session messaging), `mcp` (MCP servers as dynamic tools) |
 | Models | `provider-openai`, `provider-anthropic` |
-| Agent behavior | `skills`, `memory`, `project-context` (AGENTS.md/CLAUDE.md), `compaction-structured`, `decision-advisor`\*, `session-titler`\* |
+| Agent behavior | `skills`, `memory`, `project-context` (AGENTS.md/CLAUDE.md), `compaction-structured`, `node` (pipeline nodes: JSON input/output contracts for a preset), `decision-advisor`\*, `session-titler`\* |
 | Commands | `commands-core` (the built-in `/`-commands), `commands-md` (markdown `/`-commands) |
 | Other | `cost-tracker`, `opencode-compat` (reads an existing opencode setup) |
 
@@ -182,4 +179,5 @@ make server-only   # no TUI client
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 Issues and pull requests are welcome; for anything larger than a small fix,
-please open an issue first to discuss the approach.
+please open an issue first to discuss the approach. Commits need a DCO
+sign-off (`git commit -s`) -- see [CONTRIBUTING.md](CONTRIBUTING.md).
