@@ -654,6 +654,8 @@ if(Python3_Interpreter_FOUND)
         add_test(NAME policy_constants
                  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/check_policy_constants.py"
                          --build-dir "${CMAKE_BINARY_DIR}")
+        # clang-tidy over the whole tree: minutes on a 2-core CI runner.
+        set_tests_properties(policy_constants PROPERTIES TIMEOUT 900)
     endif()
     # Core + one provider is a working harness, and every bundled plugin can be
     # disabled alone (tests/plugin_matrix_test.py, against the real binaries).

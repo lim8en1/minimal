@@ -3436,8 +3436,13 @@ TEST_CASE("an unknown command is answered immediately, not after the turn",
     // command" minutes later. Nothing about that reply depends on the worker.
     ServiceFixture fixture;
     fixture.commands.Register(std::make_unique<testing::RecordingCommand>());
-    fixture.tools.Register(
-        std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly, "contents"));
+    // The turn PARKS in its tool until the answer is in: with an instant tool
+    // the whole turn could finish before the server even read the command off
+    // the stream (a loaded runner), and "overtakes" would be unfalsifiable.
+    std::atomic<bool> tool_started{false};
+    auto gated = std::make_unique<testing::GatedTool>("read", tool_started);
+    testing::GatedTool* gate = gated.get();
+    fixture.tools.Register(std::move(gated));
     fixture.Script(testing::ToolUseResponse("call-1", "read", {{"path", "a.txt"}}));
     fixture.Script(testing::TextResponse("done"));
     fixture.Start();
@@ -3464,6 +3469,7 @@ TEST_CASE("an unknown command is answered immediately, not after the turn",
             break;
         }
     }
+    gate->Release();   // the turn may not have reached the tool yet; then it never parks
     (void)DrainAndFinish(stream);
 
     REQUIRE(result.has_value());

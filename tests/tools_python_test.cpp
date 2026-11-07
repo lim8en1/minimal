@@ -614,11 +614,17 @@ TEST_CASE("input() parks until the stdin channel is fed, then the protocol survi
     };
     const auto id3 = interp->Submit("input()", true, killer, &submit_error);
     REQUIRE(id3.has_value());
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    const auto baseline1 = interp->Progress();
-    interp->SoftInterrupt();
-    CHECK(interp->WaitForInterrupt(baseline1, std::chrono::seconds(5), nullptr) ==
-          Interpreter::InterruptOutcome::kResponse);
+    // No fixed sleep can promise the driver has reached input(): under load
+    // it may not have read the request yet, and an interrupt then is (rightly)
+    // spent as an idle one. Repeat until the request itself answers.
+    auto reaction = Interpreter::InterruptOutcome::kNoReaction;
+    for (int attempt = 0; attempt < 20 && reaction != Interpreter::InterruptOutcome::kResponse;
+         ++attempt) {
+        const auto baseline = interp->Progress();
+        interp->SoftInterrupt();
+        reaction = interp->WaitForInterrupt(baseline, std::chrono::seconds(5), nullptr);
+    }
+    CHECK(reaction == Interpreter::InterruptOutcome::kResponse);
     WaitFor([&] { return killed->Has("KeyboardInterrupt"); }, std::chrono::seconds(10));
     CHECK(interp->alive());
 }
