@@ -13,9 +13,12 @@ on:
 permissions:
   contents: read
 
+# A newer push to a PR supersedes its running build. On main nothing is
+# cancelled: a run there may be hours into a cold dependency build (and a
+# manual run shares the group), so later runs queue behind it instead.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-test:
