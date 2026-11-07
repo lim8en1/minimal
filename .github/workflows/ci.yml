@@ -93,5 +93,13 @@ jobs:
       - name: Build
         run: cmake --build --preset default --target all minimal_test_binaries
 
+      # policy_constants re-parses every source file with clang-tidy -- about
+      # a second full compile, which overruns any ctest timeout on a runner
+      # while competing with the parallel tests. Its own step instead.
       - name: Test
-        run: ctest --preset default
+        run: ctest --preset default -E '^policy_constants$'
+
+      - name: Policy constants (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 60
+        run: python3 scripts/check_policy_constants.py --build-dir build
