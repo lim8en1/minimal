@@ -74,7 +74,8 @@ std::string UsageText() {
            "       minimal status-bar [...]  the status bar's layout, a sample, and a\n"
            "                                 ui.json block to edit (minimal status-bar --help)\n"
            "\n"
-           "  -p, --print PROMPT        run one turn headlessly and exit\n"
+           "  -p, --print PROMPT        run one turn headlessly and exit; '-p -' reads the\n"
+           "                              prompt from stdin\n"
            "      --resume SESSION_ID   open a stored session: attach to it in the TUI\n"
            "                              (or run one headless turn with -p); it keeps its\n"
            "                              stored preset and project_root\n"
@@ -88,8 +89,10 @@ std::string UsageText() {
            "                              it applies to the resumed turn only (requires -p)\n"
            "      --model P/M           provider/model (default: settings.json\n"
            "                              default_model, or this project's last pick)\n"
-           "      --output-format FMT   text (default) or jsonl; json is a --list-sessions\n"
-           "                              listing for scripts\n"
+           "      --output-format FMT   text (default), jsonl, or result (only the turn's\n"
+           "                              structured result, e.g. a node preset's\n"
+           "                              submit_result; exit 6 when there is none);\n"
+           "                              json is a --list-sessions listing for scripts\n"
            "      --signals LIST        comma-separated signal subscriptions for this\n"
            "                              session: 'channel/signal', 'channel' (extended\n"
            "                              channels), or 'sessions' (agent-to-agent)\n"
@@ -107,6 +110,11 @@ std::string UsageText() {
            "\n"
            "SIGINT/SIGTERM during a -p turn cancels it through the protocol: the\n"
            "process exits 4 once the server reports the turn cancelled.\n"
+           "\n"
+           "Exit codes: 0 ok, 2 output truncated, 3 model error, 4 cancelled,\n"
+           "5 paused, 6 no structured result (--output-format result), 64 usage,\n"
+           "65 prompt rejected (hook or turn gate, e.g. a node input contract),\n"
+           "69 server unavailable, 70 internal error.\n"
            "\n"
            "Values that start with '-' must use the --flag=value form, e.g.\n"
            "  minimal --print=--version-is-not-a-flag-here\n";
@@ -173,6 +181,13 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
             if (!value) return parsed;
             headless = true;
             prompt_set = true;
+            // The last -p wins, as for every other flag.
+            parsed.headless.prompt_from_stdin = !has_inline && *value == "-";
+            if (parsed.headless.prompt_from_stdin) {
+                parsed.headless.prompt.clear();
+                parsed.headless.command.reset();
+                continue;
+            }
             // Sanitized once, used everywhere below: a raw argv prompt is
             // whatever bytes the OS handed over, and
             // CreateSessionRequest.name/RunTurn's prompt field are proto3
@@ -248,12 +263,14 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
             if (!value) return parsed;
             if (*value == "jsonl") {
                 parsed.headless.jsonl = true;
+            } else if (*value == "result") {
+                parsed.headless.result_only = true;
             } else if (*value == "json") {
                 parsed.headless.list_json = true;
             } else if (*value != "text") {
                 parsed.action = ParsedArgs::Action::Error;
                 parsed.error = "unknown --output-format '" + std::string(*value) +
-                               "' (want text, jsonl or json)";
+                               "' (want text, jsonl, result or json)";
                 return parsed;
             }
         } else if (name == "--signals") {
@@ -321,7 +338,8 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
         }
     }
 
-    if (headless && prompt_set && parsed.headless.prompt.empty()) {
+    if (headless && prompt_set && !parsed.headless.prompt_from_stdin &&
+        parsed.headless.prompt.empty()) {
         parsed.action = ParsedArgs::Action::Error;
         parsed.error = "-p needs a non-empty prompt";
         return parsed;
@@ -347,9 +365,9 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
                            "(--agent/--model/--signals)";
             return parsed;
         }
-        if (parsed.headless.jsonl) {
+        if (parsed.headless.jsonl || parsed.headless.result_only) {
             parsed.action = ParsedArgs::Action::Error;
-            parsed.error = "--output-format jsonl is a turn format; use json for a "
+            parsed.error = "--output-format jsonl/result are turn formats; use json for a "
                            "--list-sessions listing";
             return parsed;
         }

@@ -3417,3 +3417,88 @@ TEST_CASE("an effective compaction carries no warning", "[agent_loop][compaction
     REQUIRE(h.compaction_events.size() == 1);
     CHECK(h.compaction_events[0].warning.empty());
 }
+
+// --- tools::ToolResult::turn_result: a tool finishing the turn -------------
+
+TEST_CASE("a tool's turn result ends the turn after its round: EndTurn, result kept, round persisted",
+          "[agent_loop][turn_result]") {
+    Harness h;
+    auto& submit = h.AddTool("submit");
+    submit.set_turn_result(nlohmann::json{{"answer", 42}});
+    auto& other = h.AddTool("other");
+    // No response after the tool round: a provider call following the
+    // submission would fail the turn instead of ending it.
+    h.provider.PushResponse(MultiToolUseResponse({{"t1", "other"}, {"t2", "submit"}}));
+    h.Build();
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    CHECK(result.provider_calls == 1);
+    REQUIRE(result.turn_result.has_value());
+    CHECK(*result.turn_result == nlohmann::json{{"answer", 42}});
+    CHECK(other.calls.size() == 1);  // the round's other call still ran
+    REQUIRE(h.store.messages.size() == 3);  // user, assistant, results
+    CHECK(h.store.messages[2].content.size() == 2);
+}
+
+TEST_CASE("an error result never finishes the turn, whatever turn_result it carries",
+          "[agent_loop][turn_result]") {
+    Harness h;
+    auto& submit = h.AddTool("submit");
+    submit.set_turn_result(nlohmann::json{{"answer", 1}});
+    submit.set_is_error(true);
+    h.provider.PushResponse(ToolUseResponse("t1", "submit"));
+    h.provider.PushResponse(TextResponse("gave up"));
+    h.Build();
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    CHECK(result.provider_calls == 2);
+    CHECK_FALSE(result.turn_result.has_value());
+}
+
+TEST_CASE("the first turn result in block order wins", "[agent_loop][turn_result]") {
+    Harness h;
+    h.AddTool("first").set_turn_result(nlohmann::json("one"));
+    h.AddTool("second").set_turn_result(nlohmann::json("two"));
+    h.provider.PushResponse(MultiToolUseResponse({{"t1", "second"}, {"t2", "first"}}));
+    h.Build();
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    REQUIRE(result.turn_result.has_value());
+    CHECK(*result.turn_result == nlohmann::json("two"));
+}
+
+// --- preset tool_choice: required -------------------------------------------
+
+TEST_CASE("tool_choice required rides main-loop requests that offer tools", "[agent_loop][tool_choice]") {
+    Harness h;
+    h.AddTool("alpha");
+    h.provider.PushResponse(TextResponse("ok"));
+    agent::AgentPreset preset;
+    preset.tool_choice_required = true;
+    h.Build(preset);
+
+    CHECK(h.loop->BuildChatRequest().tool_choice.kind == llm::ToolChoiceKind::Required);
+}
+
+TEST_CASE("tool_choice stays auto by default, and with no tools on offer", "[agent_loop][tool_choice]") {
+    SECTION("default preset") {
+        Harness h;
+        h.AddTool("alpha");
+        h.provider.PushResponse(TextResponse("ok"));
+        h.Build();
+        CHECK(h.loop->BuildChatRequest().tool_choice.kind == llm::ToolChoiceKind::Auto);
+    }
+    SECTION("required, but nothing to call") {
+        Harness h;
+        h.provider.PushResponse(TextResponse("ok"));
+        agent::AgentPreset preset;
+        preset.tool_choice_required = true;
+        h.Build(preset);
+        CHECK(h.loop->BuildChatRequest().tool_choice.kind == llm::ToolChoiceKind::Auto);
+    }
+}

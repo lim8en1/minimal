@@ -254,7 +254,7 @@ public:
             calls.push_back(input);
         }
         if (ctx.emit_output) ctx.emit_output(result_text_);
-        return tools::ToolResult{is_error_, result_text_, display_};
+        return tools::ToolResult{is_error_, result_text_, display_, turn_result_};
     }
 
     bool path_confinement_supported() const override { return path_key_.has_value(); }
@@ -299,6 +299,7 @@ public:
     void set_network_access_required(bool value) { network_access_required_ = value; }
     void set_is_error(bool value) { is_error_ = value; }
     void set_display(nlohmann::json display) { display_ = std::move(display); }
+    void set_turn_result(nlohmann::json value) { turn_result_ = std::move(value); }
     void set_disclosure(tools::PermissionDisclosure disclosure) {
         disclosure_ = std::move(disclosure);
     }
@@ -315,6 +316,7 @@ private:
     bool network_access_required_ = false;
     bool is_error_ = false;
     nlohmann::json display_ = nullptr;
+    std::optional<nlohmann::json> turn_result_;
     // Guards `calls` against concurrent executes (parallel dispatch).
     std::mutex mu_;
 };

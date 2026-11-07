@@ -84,6 +84,12 @@ struct AgentPresetFrontmatter {
     // Ceiling on the subagent's tool rounds when THIS preset is spawned as a
     // child (a spawn request may lower it, never raise it). nullopt = unbounded.
     std::optional<int> steps;
+    // `tool_choice: auto | required`. Required makes every main-loop request
+    // demand a tool call, so the model cannot end a round in prose: the turn
+    // ends only through a tool that finishes it (tools::ToolResult::
+    // turn_result -- the node plugin's submit_result) or the turn ceiling.
+    // Summarizer/compaction requests never inherit it.
+    bool tool_choice_required = false;
     // The preset's provider parameters (`parameters:` plus the allowlisted
     // top-level keys), merged OVER the resolved model's parameters at
     // registry resolve time (a preset's value beats the model's default).

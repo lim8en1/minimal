@@ -470,6 +470,16 @@ TEST_CASE("every SessionEvent alternative lands on its ServerEvent oneof", "[pro
     agent::TurnCompleted reported;
     reported.usage = llm::Usage{1, 1, 0, 0};
     CHECK_FALSE(trip(reported).turn_completed().usage_estimated());
+    CHECK(trip(reported).turn_completed().result_json().empty());
+
+    agent::TurnCompleted with_result;
+    with_result.stop_reason = llm::StopReason::EndTurn;
+    with_result.result_json = R"({"total":12.5})";
+    CHECK(trip(with_result).turn_completed().result_json() == R"({"total":12.5})");
+
+    agent::TurnCompleted rejected;
+    rejected.stop_reason = llm::StopReason::Rejected;
+    CHECK(trip(rejected).turn_completed().stop_reason() == v1::STOP_REASON_REJECTED);
 
     const auto error_out = trip(agent::SessionError{"backlog full"}).error();
     CHECK(error_out.category() == v1::LLM_ERROR_CATEGORY_UNSPECIFIED);

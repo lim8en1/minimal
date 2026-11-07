@@ -89,6 +89,9 @@ struct TurnCompleted {
     // backend-reported count (the zero-usage proxy gap). Clients render it;
     // nobody prices it.
     bool usage_estimated = false;
+    // A tool's structured turn result (tools::ToolResult::turn_result),
+    // serialized; empty = the turn produced none.
+    std::string result_json;
 };
 
 // The ad-hoc refusal/error sites (backlog full, malformed rewind, hook veto,

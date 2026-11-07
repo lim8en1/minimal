@@ -43,6 +43,7 @@ v1::StopReason ToProto(llm::StopReason value) {
         case llm::StopReason::Refusal:       return v1::STOP_REASON_REFUSAL;
         case llm::StopReason::Cancelled:     return v1::STOP_REASON_CANCELLED;
         case llm::StopReason::Paused:        return v1::STOP_REASON_PAUSED;
+        case llm::StopReason::Rejected:      return v1::STOP_REASON_REJECTED;
         case llm::StopReason::Unknown:       return v1::STOP_REASON_UNSPECIFIED;
     }
     return v1::STOP_REASON_UNSPECIFIED;
@@ -332,6 +333,7 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 *completed->mutable_usage() = ToProto(value.usage);
                 completed->set_hit_max_turns(value.hit_max_turns);
                 completed->set_usage_estimated(value.usage_estimated);
+                completed->set_result_json(value.result_json);
             } else if constexpr (std::is_same_v<T, agent::SessionError>) {
                 auto* error = out.mutable_error();
                 error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);

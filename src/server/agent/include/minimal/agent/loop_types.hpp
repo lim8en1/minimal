@@ -45,6 +45,8 @@
 
 namespace minimal::agent {
 
+class TurnGateRegistry;
+
 // True on a thread while it runs a tool's execute(): a permission check
 // marshalled onto the session worker from there would deadlock (the worker
 // is waiting for this very tool), so Session::CheckPermission refuses it.
@@ -117,6 +119,10 @@ struct LoopConfig {
     // EmitAsync calls and become no-ops. Owned by main, shared by every
     // session, read-only after Configure.
     const hooks::HookDispatcher* hooks = nullptr;
+
+    // Plugin prompt vetoes (turn_gate.hpp). Borrowed, process-wide, wired by
+    // the SessionRegistry funnel exactly like `hooks`; null = no gates.
+    const TurnGateRegistry* turn_gates = nullptr;
 
     // S4: the compaction strategy, resolved ONCE in main.cpp by name
     // (memory.compaction_strategy) via CompactionStrategyRegistry and copied
@@ -359,6 +365,10 @@ struct TurnResult {
     // False when ANY round of the turn went unreported: the sum above is then
     // a lower bound and must be treated as unreported, not billed partially.
     bool turn_usage_fully_reported = true;
+    // Set when a tool finished the turn with a structured result
+    // (tools::ToolResult::turn_result); the turn then ends with EndTurn.
+    // Wire: TurnCompletedEvent.result_json.
+    std::optional<nlohmann::json> turn_result;
 };
 
 // RESUME: the stored transcript, loaded without being re-appended -- the

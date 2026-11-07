@@ -699,3 +699,11 @@ TEST_CASE("ParseAgentPresetFrontmatter: permission_mode shape errors name the fi
     CHECK_THROWS_WITH(Parse("---\nname: a\npermission_mode: ask\n---\nb\n"),
                       ContainsSubstring("permission_mode must be a map"));
 }
+
+TEST_CASE("ParseAgentPresetFrontmatter: tool_choice is auto or required", "[agent_preset_frontmatter]") {
+    CHECK_FALSE(Parse("---\nname: a\n---\nb\n").tool_choice_required);
+    CHECK_FALSE(Parse("---\nname: a\ntool_choice: auto\n---\nb\n").tool_choice_required);
+    CHECK(Parse("---\nname: a\ntool_choice: required\n---\nb\n").tool_choice_required);
+    CHECK_THROWS_AS(Parse("---\nname: a\ntool_choice: submit_result\n---\nb\n"), std::runtime_error);
+    CHECK_THROWS_AS(Parse("---\nname: a\ntool_choice: [required]\n---\nb\n"), std::runtime_error);
+}

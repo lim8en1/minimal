@@ -24,6 +24,7 @@ minimal_server_module(agent
         spawn_subagent_tool.cpp
         session_observer_registry.cpp
         context_contributor.cpp
+        turn_gate.cpp
         session.cpp
         session_sinks.cpp
         tool_source_activation.cpp

@@ -67,5 +67,6 @@ names. Configured in providers.json, not plugins.json
 | skills | `skill` tool + per-skill permission model (`plugin_permissions.skills`), per-preset listing and preloads | [README](server/skills/README.md) |
 | project-context | AGENTS.md / CLAUDE.md as the first context section of every session | [README](server/project-context/README.md) |
 | compaction-structured | the `structured` compaction strategy (`record_summary` tool call → typed summary sections) | [README](server/compaction-structured/README.md) |
+| node | pipeline nodes: a preset's `tool_config.node` JSON contracts -- an input gate on the prompt, and `submit_result` whose valid call is the turn's structured result | [README](server/node/README.md) |
 | opencode-compat | opencode-shaped `providers.json` entries, and opencode's `auth.json` as the `secret:opencode-compat:` namespace | [README](server/opencode-compat/README.md) |
 | decision-advisor | Decision-model permission advisor: TypeSafe Jev, or Clef on a local llama-server (auto-allow/auto-deny with abstain-to-human). **Ships disabled** — enable in plugins.json + permissions.json `advisor` | [README](server/decision-advisor/README.md) |

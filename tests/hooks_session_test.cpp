@@ -152,6 +152,12 @@ TEST_CASE("a user_prompt_submit hook refusal refuses the turn, answers the clien
     // The end-of-turn signal anyway: a headless client reads until
     // TurnCompletedEvent, and a refusal is an exit path.
     CHECK(HasTurnCompleted(events));
+    // ...reporting the veto as such (headless exit 65), not as Unknown.
+    for (const auto& event : events) {
+        if (event.has_turn_completed()) {
+            CHECK(event.turn_completed().stop_reason() == v1::STOP_REASON_REJECTED);
+        }
+    }
     // The observer was told the turn ended, veto or not.
     CHECK(recorder->completed.load() == 1);
     // Nothing was appended to the transcript.

@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <iterator>
 #include <mutex>
 #include <string>
@@ -76,6 +77,8 @@ int ExitCodeFor(minimal::v1::StopReason stop_reason) {
             return kCancelled;
         case minimal::v1::STOP_REASON_PAUSED:
             return kPaused;
+        case minimal::v1::STOP_REASON_REJECTED:
+            return kRejected;
         case minimal::v1::STOP_REASON_CONTENT_FILTER:
         case minimal::v1::STOP_REASON_REFUSAL:
             return kModelError;
@@ -164,7 +167,15 @@ nlohmann::json ServerEventToJsonLine(const minimal::v1::ServerEvent& event) {
         line["kind"] = event.plugin_prompt().kind();
     } else if (event.has_turn_completed()) {
         line["type"] = "turn_completed";
+        line["stop_reason"] = minimal::v1::StopReason_Name(event.turn_completed().stop_reason());
         line["hit_max_turns"] = event.turn_completed().hit_max_turns();
+        // The structured result IN BAND as JSON, not a string to re-parse. The
+        // server serialized it from a parsed value, so a parse failure is a
+        // bug; it degrades to the raw string rather than dropping the result.
+        if (const std::string& result = event.turn_completed().result_json(); !result.empty()) {
+            line["result"] = nlohmann::json::parse(result, nullptr, /*allow_exceptions=*/false);
+            if (line["result"].is_discarded()) line["result"] = result;
+        }
     } else if (event.has_session_ended()) {
         line["type"] = "session_ended";
     } else if (event.has_compaction()) {
@@ -185,7 +196,27 @@ nlohmann::json ServerEventToJsonLine(const minimal::v1::ServerEvent& event) {
 
 }  // namespace
 
-int RunHeadless(const HeadlessOptions& options) {
+int RunHeadless(const HeadlessOptions& parsed_options) {
+    // `-p -`: the prompt is stdin, read here (ParseArgs stays pure) and BEFORE
+    // connecting, so an empty pipe fails as a usage error without spawning or
+    // dialling a server.
+    HeadlessOptions options = parsed_options;
+    if (options.prompt_from_stdin) {
+        std::string input((std::istreambuf_iterator<char>(std::cin)),
+                          std::istreambuf_iterator<char>());
+        if (!std::cin.eof() && std::cin.fail()) {
+            std::fprintf(stderr, "could not read the prompt from stdin\n");
+            return kUsage;
+        }
+        // Same repair as an argv prompt (ParseArgs): the server rejects
+        // invalid UTF-8 in a proto3 string outright.
+        options.prompt = common::ScrubUtf8(input);
+        if (options.prompt.find_first_not_of(" \t\r\n") == std::string::npos) {
+            std::fprintf(stderr, "-p -: stdin was empty\n");
+            return kUsage;
+        }
+    }
+
     // Already resolved by ParseArgs -- a bare path became a unix:// target
     // there, so what is printed on failure is what was actually dialled.
     const std::string target =
@@ -298,11 +329,21 @@ int RunHeadless(const HeadlessOptions& options) {
     // events and derive an exit code the same way, and a queued turn's own
     // output is otherwise indistinguishable from one this process started
     // directly.
+    // --output-format result: the turn's structured result, printed alone
+    // once the run is over (nullopt = the turn produced none).
+    std::optional<std::string> turn_result;
     const auto on_turn_event = [&](const minimal::v1::ServerEvent& event) {
         if (options.jsonl) {
             // One JSON value per line, so the stream stays parseable
             // incrementally rather than only once complete.
             PrintJsonLine(ServerEventToJsonLine(event));
+        } else if (event.has_error()) {
+            // Text and result modes keep stdout for the output; the reason a
+            // run failed (a rejected prompt, a provider error) goes to stderr
+            // instead of vanishing behind a bare exit code.
+            std::fprintf(stderr, "error: %s\n", event.error().message().c_str());
+        } else if (options.result_only) {
+            // Nothing streams: stdout is the result alone, written at the end.
         } else if (event.has_stream_event() && event.stream_event().has_text_delta()) {
             // Text mode prints the assistant's words and nothing else.
             std::fputs(event.stream_event().text_delta().text().c_str(), stdout);
@@ -326,6 +367,9 @@ int RunHeadless(const HeadlessOptions& options) {
             // Hitting the turn ceiling is not success: the work stopped
             // short of an answer, which is the same shape as truncation.
             if (event.turn_completed().hit_max_turns()) exit_code = kTruncated;
+            if (!event.turn_completed().result_json().empty()) {
+                turn_result = event.turn_completed().result_json();
+            }
         }
         if (event.has_error()) saw_error = true;
         // The server-side kill: stop reading and report the run as
@@ -504,7 +548,7 @@ int RunHeadless(const HeadlessOptions& options) {
         if (thread.joinable()) thread.join();
     }
 
-    if (!options.jsonl) std::fputc('\n', stdout);
+    if (!options.jsonl && !options.result_only) std::fputc('\n', stdout);
 
     if (!status.ok()) {
         std::fprintf(stderr, "stream ended with an error: %s\n", status.error_message().c_str());
@@ -514,7 +558,22 @@ int RunHeadless(const HeadlessOptions& options) {
         std::fprintf(stderr, "the session was terminated by the server\n");
         return kUnavailable;
     }
+    // A rejected prompt always carries an ErrorEvent with the reason; the
+    // rejection is the more specific outcome, so it outranks saw_error.
+    if (exit_code == kRejected) return kRejected;
     if (saw_error) return kModelError;
+    if (options.result_only) {
+        // The result is the whole output, and its absence is a failure of the
+        // run's contract even when the turn itself ended cleanly (a preset
+        // without tool_choice: required that answered in prose).
+        if (!turn_result) {
+            std::fprintf(stderr, "the turn produced no structured result\n");
+            return exit_code == kOk ? kNoResult : exit_code;
+        }
+        const std::string line = *turn_result + "\n";
+        std::fwrite(line.data(), 1, line.size(), stdout);
+        std::fflush(stdout);
+    }
     return exit_code;
 }
 

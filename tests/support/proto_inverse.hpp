@@ -22,6 +22,7 @@ inline llm::StopReason FromProto(v1::StopReason value) {
         case v1::STOP_REASON_REFUSAL:        return llm::StopReason::Refusal;
         case v1::STOP_REASON_CANCELLED:      return llm::StopReason::Cancelled;
         case v1::STOP_REASON_PAUSED:         return llm::StopReason::Paused;
+        case v1::STOP_REASON_REJECTED:       return llm::StopReason::Rejected;
         default:                             return llm::StopReason::Unknown;
     }
 }

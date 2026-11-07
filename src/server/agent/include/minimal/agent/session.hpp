@@ -689,7 +689,8 @@ private:
     // a client that learns a turn ended only by seeing it succeed hangs on
     // every error.
     void EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& usage,
-                           bool hit_max_turns, bool usage_estimated = false);
+                           bool hit_max_turns, bool usage_estimated = false,
+                           std::string result_json = {});
     // A brand-new session is unnamed until its first user turn's text names it:
     // `candidate` (agent::DefaultSessionName of the turn's raw text, computed
     // by RunOneTurn before the turn runs) is stored via
@@ -777,6 +778,7 @@ private:
     // Session reads the same copy for kUserPromptSubmit and the ToolExecutor
     // it builds, instead of also taking its own SessionParams::hooks.
     const hooks::HookDispatcher* hooks_ = nullptr;
+    const TurnGateRegistry* turn_gates_ = nullptr;
     // The user's explicit model choice. Outranks the preset's, and survives
     // /agent re-resolving it.
     std::optional<common::ModelRef> model_override_;

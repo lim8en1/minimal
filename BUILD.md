@@ -39,8 +39,8 @@ On Linux, vcpkg itself also needs `curl`, `zip`, `unzip`, `tar`, and
 `cmake`).
 
 All C/C++ dependencies come from the vcpkg manifest: `grpc`, `protobuf`,
-`curl`, `sqlite3`, `nlohmann-json`, `yaml-cpp`, `spdlog`, `tree-sitter`, `re2`
-— plus `ftxui` and `md4c` for the client and `catch2` for tests (vcpkg
+`curl`, `sqlite3`, `nlohmann-json`, `yaml-cpp`, `spdlog`, `tree-sitter`, `re2`,
+`json-schema-validator` — plus `ftxui` and `md4c` for the client and `catch2` for tests (vcpkg
 features, on by default). The per-language tree-sitter grammars (bash, C++,
 Python, JS/TS, JSON, YAML, Rust, Go) are vendored via FetchContent as well.
 

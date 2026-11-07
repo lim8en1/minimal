@@ -112,8 +112,12 @@ public:
     // Runs a prepared call. Thread-safe: reads nothing mutable on *this. The
     // ctx passed here belongs to THIS invocation (parallel callers each hold
     // their own). NEVER THROWS, for the same history-integrity reason as Run.
+    // `turn_result`, when given, receives a successful result's
+    // ToolResult::turn_result (left untouched otherwise): the block is what the
+    // model reads, the turn result is what the loop acts on.
     [[nodiscard]] llm::ToolResultBlock Execute(const PreparedInvocation& prepared,
-                                               ToolContext& ctx);
+                                               ToolContext& ctx,
+                                               std::optional<nlohmann::json>* turn_result = nullptr);
 
     // Sequential convenience: gate and run on the calling thread.
     llm::ToolResultBlock Run(const std::string& tool_use_id, const std::string& tool_name,

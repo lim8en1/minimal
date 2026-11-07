@@ -272,6 +272,10 @@ void PluginLoader::BuildTargets() {
               [](const agent::ContextContributorRegistry& registry, const std::string& plugin) {
                   return Repeat(registry.CountOwnedBy(plugin), "session prefill");
               });
+    AddTarget(targets_, "minimal_plugin_register_turn_gates", "turn gate", registries_.turn_gates,
+              [](const agent::TurnGateRegistry& registry, const std::string& plugin) {
+                  return Repeat(registry.CountOwnedBy(plugin), "prompt gate");
+              });
     AddTarget(targets_, "minimal_plugin_register_mention_resolver", "mention", registries_.mention_resolvers,
               [](const agent::MentionResolverRegistry& registry, const std::string& plugin) {
                   return Repeat(registry.OwnedBy(plugin) ? 1 : 0, "@-mention resolver");

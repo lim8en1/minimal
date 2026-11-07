@@ -115,6 +115,8 @@ struct AgentPreset {
     // requests may lower it, never raise it). nullopt = unbounded. Applies to
     // nothing else: a top-level session is the operator's to interrupt.
     std::optional<int> steps;
+    // `tool_choice: required` (AgentPresetFrontmatter::tool_choice_required).
+    bool tool_choice_required = false;
 
     // Set for any session with a non-null parent_session_id. Drives the
     // unconditional exclusion of the subagent-spawn tool -- see

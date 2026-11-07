@@ -434,6 +434,7 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     preset.hidden = raw.hidden;
     preset.color = raw.color;
     preset.steps = raw.steps;
+    preset.tool_choice_required = raw.tool_choice_required;
     // Plugin prompt appendices (preloaded skill bodies) join below, once the
     // preset's permission models are bound -- they read them.
     preset.system_prompt = raw.body;

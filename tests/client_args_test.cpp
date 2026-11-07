@@ -399,3 +399,44 @@ TEST_CASE("a -p prompt with invalid UTF-8 is sanitized, not sent raw",
     REQUIRE(parsed.action == ParsedArgs::Action::Headless);
     CHECK(parsed.headless.prompt == "caf\xEF\xBF\xBD");
 }
+
+TEST_CASE("a bare dash prompt reads stdin; --print=- is the literal text", "[client_args][stdin]") {
+    SECTION("bare dash") {
+        const auto parsed = Parse({"-p", "-", "--agent", "extract"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Headless);
+        CHECK(parsed.headless.prompt_from_stdin);
+        CHECK(parsed.headless.prompt.empty());
+        CHECK_FALSE(parsed.headless.command.has_value());
+    }
+    SECTION("the '=' form means text") {
+        const auto parsed = Parse({"--print=-"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Headless);
+        CHECK_FALSE(parsed.headless.prompt_from_stdin);
+        CHECK(parsed.headless.prompt == "-");
+    }
+    SECTION("the last -p wins") {
+        const auto parsed = Parse({"-p", "-", "-p", "hello"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Headless);
+        CHECK_FALSE(parsed.headless.prompt_from_stdin);
+        CHECK(parsed.headless.prompt == "hello");
+    }
+}
+
+TEST_CASE("output-format result is a turn format", "[client_args][result]") {
+    SECTION("accepted on a turn") {
+        const auto parsed = Parse({"-p", "-", "--output-format", "result"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Headless);
+        CHECK(parsed.headless.result_only);
+        CHECK_FALSE(parsed.headless.jsonl);
+    }
+    SECTION("refused on a listing") {
+        const auto parsed = Parse({"--list-sessions", "--output-format", "result"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Error);
+    }
+    SECTION("documented with its exit codes") {
+        const auto usage = UsageText();
+        CHECK(usage.find("result") != std::string::npos);
+        CHECK(usage.find("65") != std::string::npos);
+        CHECK(usage.find("-p -") != std::string::npos);
+    }
+}

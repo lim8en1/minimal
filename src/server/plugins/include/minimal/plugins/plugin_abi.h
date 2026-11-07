@@ -40,6 +40,7 @@
 #include "minimal/agent/preset_extensions.hpp"
 #include "minimal/agent/compaction_strategy.hpp"
 #include "minimal/agent/context_contributor.hpp"
+#include "minimal/agent/turn_gate.hpp"
 #include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_observer.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
@@ -345,6 +346,13 @@ void minimal_plugin_register_mention_resolver(minimal::agent::MentionResolverReg
 void minimal_plugin_register_context_contributors(
     minimal::agent::ContextContributorRegistry&,
     const minimal::plugins::PluginRegistrationContext&);
+
+// Additive: prompt vetoes asked at the start of every top-level turn, after
+// the per-turn preset override is applied. A rejection persists nothing and
+// completes the turn with StopReason::Rejected; a throwing gate fails closed.
+// See turn_gate.hpp for the full contract.
+void minimal_plugin_register_turn_gates(minimal::agent::TurnGateRegistry&,
+                                        const minimal::plugins::PluginRegistrationContext&);
 
 
 // Exclusive: one global choice. First registration wins; a second logs a

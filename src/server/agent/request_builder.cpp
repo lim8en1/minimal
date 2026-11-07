@@ -133,6 +133,13 @@ llm::ChatRequest RequestBuilder::BuildChatRequest() const {
     // decision, made per request from the parameters riding alongside.
     request.session_id = session_id_;
     request.stream = true;
+    // Main-loop requests only: the summarizer builds its own request
+    // (BuildSummarizerRequest) and must stay free to answer in text. Constant
+    // for the session, so it never disturbs the prompt-cache prefix. With no
+    // tools on offer there is nothing to require.
+    if (preset_.tool_choice_required && !request.tools.empty()) {
+        request.tool_choice.kind = llm::ToolChoiceKind::Required;
+    }
     return request;
 }
 

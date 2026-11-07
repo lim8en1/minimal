@@ -26,7 +26,11 @@
     "yaml-cpp",
     "spdlog",
     "tree-sitter",
-    "re2"
+    "re2",
+    {
+      "$comment": "node plugin: JSON Schema (draft-7) validation of a node preset's input/output contracts. Linked into that plugin only.",
+      "name": "json-schema-validator"
+    }
   ],
   "features": {
     "client": {

@@ -45,6 +45,10 @@ enum class StopReason {
     // its results are persisted -- and no further provider call was made.
     // Distinct from Cancelled: "suspended, will continue", not "halted".
     Paused,
+    // The turn's prompt was vetoed before anything ran or was persisted -- a
+    // core.user_prompt_submit hook or a plugin turn gate (turn_gate.hpp). Never
+    // produced by a provider.
+    Rejected,
     Unknown,
 };
 

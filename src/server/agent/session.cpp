@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "minimal/agent/mention_expansion.hpp"
+#include "minimal/agent/turn_gate.hpp"
 #include "minimal/agent/session_naming.hpp"
 #include "minimal/agent/session_sinks.hpp"
 #include "minimal/agent/tool_source_activation.hpp"
@@ -182,6 +183,7 @@ Session::Session(SessionParams params, AgentPreset preset,
     // kept here for kUserPromptSubmit -- one field, not a second
     // SessionParams::hooks in sync with LoopConfig::hooks by convention.
     hooks_ = loop_config.hooks;
+    turn_gates_ = loop_config.turn_gates;
 
     observers_.NotifySessionCreated(InfoSnapshot());
     worker_ = std::thread([this] { WorkerMain(); });
@@ -1260,10 +1262,14 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
     // return early. The bottom block is the every-exit-path obligation (wire
     // TurnCompleted, observer notification, the subagent completion hook) --
     // an early return skipped all of it once, leaking per-turn observer state
-    // on every vetoed prompt. `result` stays default-constructed, so the
-    // shared exit reports exactly what the old hand-rolled veto emit did:
-    // StopReason::Unknown, empty usage, hit_max_turns false.
+    // on every vetoed prompt. `result` stays default-constructed apart from
+    // its stop reason: Rejected for a prompt veto, Unknown for a failed
+    // per-turn override; empty usage, hit_max_turns false.
     bool vetoed = false;
+    // A veto of the PROMPT (hook or turn gate) completes as Rejected; a
+    // failure to apply the per-turn override is an error, not a rejection,
+    // and keeps the default Unknown.
+    llm::StopReason veto_stop_reason = llm::StopReason::Unknown;
     if (hooks_ != nullptr && params_.parent_session_id.empty() && text) {
         nlohmann::json payload{{"session_id", params_.session_id},
                                {"project_root", params_.project_root.string()},
@@ -1274,6 +1280,7 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
                          params_.session_id, *blocked);
             EmitEvent(SessionEvent{SessionError{"prompt rejected by hook: " + *blocked}});
             vetoed = true;
+            veto_stop_reason = llm::StopReason::Rejected;
         }
     }
 
@@ -1298,8 +1305,23 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
         }
     }
 
+    // --- turn gates: the plugin prompt veto (turn_gate.hpp) -------------------
+    // AFTER the borrow, so the gate sees the preset this turn actually runs
+    // under. Same scope and fall-through shape as the hook veto above.
+    if (!vetoed && turn_gates_ != nullptr && params_.parent_session_id.empty() && text) {
+        if (auto rejection = turn_gates_->Check(
+                TurnGateRequest{params_.session_id, loop_->preset(), *text})) {
+            logger_.warn("session {}: turn gate rejected the prompt: {}", params_.session_id,
+                         *rejection);
+            EmitEvent(SessionEvent{SessionError{"prompt rejected: " + *rejection}});
+            vetoed = true;
+            veto_stop_reason = llm::StopReason::Rejected;
+        }
+    }
+
     std::int64_t first_seq = 0;
     TurnResult result;
+    if (vetoed) result.stop_reason = veto_stop_reason;
     if (!vetoed) result = ExecuteTurn(std::move(text), first_seq);
     FinishTurn(std::move(result), vetoed, first_seq, default_name_candidate, started);
 }
@@ -1394,7 +1416,8 @@ void Session::FinishTurn(TurnResult result, bool vetoed, std::int64_t first_seq,
     }
     try {
         EmitTurnCompleted(result.stop_reason, result.last_usage, result.hit_max_turns,
-                          result.usage_estimated);
+                          result.usage_estimated,
+                          result.turn_result ? result.turn_result->dump() : std::string());
     } catch (...) {
         logger_.warn("session {}: emitting TurnCompletedEvent failed", params_.session_id);
     }
@@ -1421,6 +1444,7 @@ void Session::FinishTurn(TurnResult result, bool vetoed, std::int64_t first_seq,
         // empty, because the loop collected it nowhere and this never set it.
         summary.tool_names_invoked = std::move(result.tool_names_invoked);
         summary.model = std::move(result.model);
+        summary.turn_result = result.turn_result;
         summary.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started);
         observers_.NotifyTurnCompleted(InfoSnapshot(), std::move(summary));
@@ -1454,13 +1478,15 @@ void Session::FinishTurn(TurnResult result, bool vetoed, std::int64_t first_seq,
 }
 
 void Session::EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& usage,
-                                bool hit_max_turns, bool usage_estimated) {
+                                bool hit_max_turns, bool usage_estimated,
+                                std::string result_json) {
     // This is the turn's exit signal, and a headless client detects the end
     // of a turn by it alone. The sink never blocks and never refuses for
     // capacity -- a full subscriber drops its oldest to make room -- so the
     // terminator always lands on every attached stream unless the
     // broadcaster is already closed.
-    EmitEvent(SessionEvent{TurnCompleted{stop_reason, usage, hit_max_turns, usage_estimated}});
+    EmitEvent(SessionEvent{TurnCompleted{stop_reason, usage, hit_max_turns, usage_estimated,
+                                         std::move(result_json)}});
 }
 
 void Session::EmitDefaultNameIfComputed(const std::string& candidate) {
