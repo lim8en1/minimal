@@ -1642,23 +1642,28 @@ void AppState::SendChatTurn(const std::string& session_id, const std::string& te
     // silently vanishing reads as "the model ignored me".
     if (!SendOnStream(session_id, "send", [&](v1::ClientEvent& ev) {
             ev.mutable_chat_turn()->set_text(text);
+            // OPTIMISTIC ECHO. The persisted user row only reaches a page
+            // through a fetch, and mid-turn it is not even persisted yet (the
+            // server appends the seed message when the queued turn RUNS, not
+            // at submit) -- so a submitted message did not render until the
+            // turn ENDED, after the assistant's streaming reply had been
+            // visible for the whole turn (the reported "assistant renders
+            // before user hi"). Echo the text now; the server-side @-mention
+            // expansion (attachments render differently from raw text)
+            // arrives with the persisted row and retires the echo.
+            //
+            // BEFORE the send, like OnCommandSent and RequestCancel: once the
+            // turn is on the wire the server can run it to completion and the
+            // reader thread apply its TurnCompleted before this thread runs
+            // again -- arming afterwards then latched a finished turn as in
+            // flight, and the tab sat in Working forever. A refused send
+            // goes through OnError, which ends the turn and drops the echo.
+            if (auto state = GetState(session_id)) state->OnChatSubmitted(text);
             return true;
         })) {
         return;
     }
 
-    // OPTIMISTIC ECHO. The persisted user row only reaches a page through a
-    // fetch, and mid-turn it is not even persisted yet (the server appends
-    // the seed message when the queued turn RUNS, not at submit) -- so a
-    // submitted message did not render until the turn ENDED, after the
-    // assistant's streaming reply had been visible for the whole turn (the
-    // reported "assistant renders before user hi"). Echo the text now; the
-    // server-side @-mention expansion (attachments render differently from
-    // raw text) arrives with the persisted row and retires the echo.
-    if (auto state = GetState(session_id)) {
-        state->OnChatSubmitted(text);
-        BumpUiVersion();
-    }
     // And fetch eagerly: with the echo covering the latency, this is what
     // swaps in the authoritative expanded row within one round trip instead
     // of at turn end. Safe MID-TURN too (a submit while the agent is still
