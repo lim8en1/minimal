@@ -1,0 +1,23 @@
+name: Feature request
+description: A capability you need that minimal doesn't offer.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: What you are trying to get done, and where minimal falls short today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: |
+        What you'd change. Most capability belongs in a plugin rather than the
+        core -- say if a plugin could do it, or which extension point is missing
+        (docs/EXTENSIBILITY.md).
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
