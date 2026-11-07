@@ -23,7 +23,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        # macOS minutes bill at 10x on a private repo: pushes and PRs build
+        # Linux only; a manual run (Actions -> ci -> Run workflow) adds macOS.
+        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["ubuntu-24.04", "macos-15"]' || '["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 240
     env:
@@ -63,22 +65,27 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .vcpkg-cache
-          key: vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/**') }}
-          restore-keys: vcpkg-${{ matrix.os }}-
+          key: vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/**') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/**') }}-
+            vcpkg-${{ matrix.os }}-
 
       - name: Configure
         run: |
           mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
           ./configure
 
-      # Saved even when the build below fails: the dependency builds are the
-      # expensive part and stay valid.
+      # Saved even when Configure fails or times out: vcpkg stores each
+      # package as it finishes, so a cold build that runs out of time still
+      # banks what it built and the next run resumes from there. Cache entries
+      # are immutable, hence the run id in the key: under a fixed key the
+      # first (partial) save would win forever. Old entries age out (LRU).
       - name: Save vcpkg binary cache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .vcpkg-cache
-          key: vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/**') }}
+          key: vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/**') }}-${{ github.run_id }}
 
       - name: Build
         run: cmake --build --preset default --target all minimal_test_binaries
