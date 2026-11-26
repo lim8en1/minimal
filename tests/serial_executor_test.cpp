@@ -63,11 +63,16 @@ TEST_CASE("SerialExecutor::Stop(kDiscard) drops the backlog and leaves nothing o
     std::condition_variable cv;
     bool release = false;
     std::atomic<int> ran{0};
+    std::promise<void> taken;
     REQUIRE(executor.TryPost([&] {
+        taken.set_value();
         std::unique_lock<std::mutex> lock(mutex);
         cv.wait(lock, [&] { return release; });
         ++ran;
     }));
+    // In flight before the discard: a worker not yet scheduled would see the
+    // first task as backlog too, and drop it with the rest.
+    taken.get_future().wait();
     for (int i = 0; i < 10; ++i) REQUIRE(executor.TryPost([&] { ++ran; }));
 
     auto stopped = minimal::testing::RunInBackground([&] {
