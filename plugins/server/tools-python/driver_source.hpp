@@ -36,16 +36,25 @@
 // SIGINT SEMANTICS: one handler, one state variable -- no per-window patches.
 //   USER  (user code running): raise KeyboardInterrupt; the request fails and
 //         the interpreter survives.
-//   IDLE  (parked in the request read): emit {"idle_interrupted"} and keep
-//         reading -- the parent reports "nothing was running".
-//   BOOK  (driver bookkeeping: parsing a request, assembling a reply): never
-//         raise. Remembered, then spent at the next state change: entering
-//         USER fails that request at once (it was the parent's queue head),
-//         entering IDLE reports it as idle. A reply emitted in between
-//         clears it -- that completion IS the reaction to the signal.
+//   BOOK  (everything else: parked in the request read, parsing a request,
+//         assembling a reply): never raise, never write. Remembered, then
+//         spent: entering USER fails that request at once (it was the
+//         parent's queue head); the request read reports it as
+//         {"idle_interrupted"} -- the parent reports "nothing was running". A
+//         reply emitted in between clears it -- that completion IS the
+//         reaction to the signal.
+// The handler never writes because CPython runs handlers INSIDE a buffered
+// flush (bufferedio's flush loop checks signals with the writer's lock held):
+// a second SIGINT landing during the first one's reply would write
+// re-entrantly, raise "reentrant call", and that reply would be lost.
+// The request read is a select() on the request fd AND a signal.set_wakeup_fd
+// pipe: a handler runs only between bytecodes, so a SIGINT landing after the
+// last pending check but before a plain blocking read() would leave the read
+// parked on it until the next request. The C-level handler writes the wakeup
+// byte, so select() returns even for that one.
 // USER is entered and left only inside the per-request try, so a raise can
-// never escape the loop. The handler is re-installed after every request in
-// case executed code replaced it.
+// never escape the loop. The handler and the wakeup fd are re-installed after
+// every request in case executed code replaced them.
 //
 // The serialized queue IS the driver: one read loop, strict FIFO. A blocking
 // request (an MSRPC call held in flight, a long download) queues every later
@@ -64,11 +73,11 @@
 
 namespace minimal::tools_python {
 
-inline constexpr const char* kDriverSource = R"PY(import ast, io, json, linecache, os, signal, sys, threading, traceback
+inline constexpr const char* kDriverSource = R"PY(import ast, io, json, linecache, os, select, signal, sys, threading, traceback
 
 _MAX = int(os.environ.get("_MINIMAL_PY_CAPTURE", str(1 << 20)))
 
-_IDLE, _BOOK, _USER = 0, 1, 2
+_BOOK, _USER = 0, 1
 _st = {"mode": _BOOK, "pending": False, "emit": None}
 
 
@@ -89,12 +98,6 @@ def _on_sigint(signum, frame):
     mode = _st["mode"]
     if mode == _USER:
         raise KeyboardInterrupt
-    if mode == _IDLE:
-        try:
-            _st["emit"]({"idle_interrupted": True})
-        except BaseException:
-            pass
-        return
     _st["pending"] = True
 
 
@@ -151,8 +154,47 @@ class _Cap(io.TextIOBase):
         return text
 
 
+class _LineReader:
+    # Unbuffered by Python's io layer on purpose: select() sees only the fd,
+    # so lines must not sit in a buffer it cannot see.
+    def __init__(self, fd, wake_fd):
+        self._fd = fd
+        self._wake = wake_fd
+        self._buf = bytearray()
+
+    def readline(self):
+        while True:
+            # Every wakeup loops back here, past a bytecode boundary, so the
+            # handler for the signal that caused it has run by now.
+            if _st["pending"]:
+                _st["pending"] = False
+                _st["emit"]({"idle_interrupted": True})
+            nl = self._buf.find(b"\n")
+            if nl >= 0:
+                line = bytes(self._buf[:nl + 1])
+                del self._buf[:nl + 1]
+                return line.decode("utf-8", "replace")
+            ready, _, _ = select.select([self._fd, self._wake], [], [])
+            if self._wake in ready:
+                try:
+                    os.read(self._wake, 512)
+                except BlockingIOError:
+                    pass
+            if self._fd in ready:
+                chunk = os.read(self._fd, 65536)
+                if not chunk:
+                    line = bytes(self._buf)
+                    self._buf.clear()
+                    return line.decode("utf-8", "replace")
+                self._buf += chunk
+
+
 def _main():
-    proto_in = os.fdopen(os.dup(0), "r", encoding="utf-8", errors="replace")
+    wake_r, wake_w = os.pipe()   # non-inheritable (PEP 446): children never see it
+    os.set_blocking(wake_r, False)
+    os.set_blocking(wake_w, False)
+    signal.set_wakeup_fd(wake_w, warn_on_full_buffer=False)
+    proto_in = _LineReader(os.dup(0), wake_r)
     # fd 0 is REPLACED with /dev/null, not left as the request pipe: code
     # doing raw fd I/O (subprocess.run() without stdin=, os.system) inherits
     # the OS-level fd, and a live request pipe there would let a child
@@ -184,20 +226,7 @@ def _main():
     emit({"ready": True, "version": sys.version.split()[0], "executable": sys.executable})
 
     while True:
-        # Spend a remembered SIGINT in BOOK (a signal during the emit only
-        # sets pending), then enter IDLE -- and look again: one that landed
-        # between the check and the switch was only remembered, and the read
-        # below would sit on it until the next request.
-        while True:
-            if _st["pending"]:
-                _st["pending"] = False
-                emit({"idle_interrupted": True})
-            _st["mode"] = _IDLE
-            if not _st["pending"]:
-                break
-            _st["mode"] = _BOOK
-        line = proto_in.readline()
-        _st["mode"] = _BOOK
+        line = proto_in.readline()   # spends idle interrupts while it waits
         if not line:
             break
         line = line.strip()
@@ -284,6 +313,7 @@ def _main():
         emit(response)
         if signal.getsignal(signal.SIGINT) is not _on_sigint:
             signal.signal(signal.SIGINT, _on_sigint)
+        signal.set_wakeup_fd(wake_w, warn_on_full_buffer=False)
 
 
 try:

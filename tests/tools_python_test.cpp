@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -1314,9 +1315,15 @@ TEST_CASE("interpreter death while a sync request is parked delivers exactly ONE
     // is its OWN tool result (the woken WaitSync); an injection too would send
     // a second tool_result for the same tool_use_id -- a provider protocol
     // violation.
+    // The sleep below counts from the waiter's start, not from its creation:
+    // under a parallel run a thread can take longer than the sleep to be
+    // scheduled, and a WaitSync that first runs AFTER the kill finds the
+    // request already failed and gone (kDead) -- a different path.
     int outcome_kind = -1;
     bool outcome_ok = true;
+    std::promise<void> started;
     std::thread waiter([&] {
+        started.set_value();
         RequestOutcome outcome;
         const auto w = interp->WaitSync(*id, nullptr,
                                         std::chrono::steady_clock::now() + std::chrono::seconds(15),
@@ -1324,6 +1331,7 @@ TEST_CASE("interpreter death while a sync request is parked delivers exactly ONE
         outcome_kind = static_cast<int>(w);
         outcome_ok = outcome.ok;
     });
+    started.get_future().wait();
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     interp->HardKill("test kill");
     waiter.join();
