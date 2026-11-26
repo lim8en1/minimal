@@ -406,13 +406,21 @@ TEST_CASE("HasQueuedWork sees a sessionless tab's queued action before "
     REQUIRE_FALSE(tab.empty());
     CHECK_FALSE(app.HasQueuedWork());   // nothing queued on a fresh, untouched tab
 
+    // Park the RPC worker first: SubmitChatTurn schedules EnsureSession onto
+    // it before returning, and against an in-process server the whole create
+    // round trip can finish (draining the queue) before the check below runs.
+    std::promise<void> release;
+    std::promise<void> parked;
+    app.RunOnRpcQueue([&release, &parked] {
+        parked.set_value();
+        release.get_future().wait();
+    });
+    parked.get_future().wait();
+
     app.SubmitChatTurn(tab, "hello");
-    // The queued action is pushed synchronously (under AppState's lock)
-    // before EnsureSession is even scheduled onto the RPC worker -- checked
-    // immediately, with no wait, so this is not racing the worker's own
-    // (separate-thread) create round trip.
     CHECK(app.HasQueuedWork());
 
+    release.set_value();
     REQUIRE(WaitForSession(app, tab));
     CHECK_FALSE(app.HasQueuedWork());   // drained once the create resolved
 }
