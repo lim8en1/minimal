@@ -17,8 +17,11 @@
 // dispatch path, and the pool cannot outlive the executor/registry it borrows --
 // the round is a loop member declared after them).
 
+#include <optional>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/agent/loop_types.hpp"
@@ -55,6 +58,9 @@ public:
         // "Deny and stop": the operator is done with this turn; no provider call
         // follows the round.
         bool stop_requested = false;
+        // A call finished the turn (tools::ToolResult::turn_result): the
+        // round is answered, then the turn ends with EndTurn carrying this.
+        std::optional<nlohmann::json> turn_result;
     };
 
     // Gates and runs `tool_uses` (pointers into the assistant message, which must

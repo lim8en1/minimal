@@ -29,6 +29,7 @@ examples live beside them once copied.
 | `ctf.md` | The full arsenal (`bash`/`write`/`edit`/python) with `execute`/`file_write: allow`, per-plugin `tool_config` |
 | `reviewer.md` | `mode: subagent` (spawnable, hidden from the picker), `steps:` round ceiling, opencode `permission:` alias block |
 | `orchestrator.md` | `allowed_subagents` named allow-list (a present list is the exact set; `[]` would withhold `spawn_subagent` entirely) |
+| `node-extract.md` | **A pipeline node** (node plugin): `tool_config.node` `input_schema`/`output_schema` contracts, `tool_choice: required`, `submit_result` as the only tool. Run: `echo '{"text":"Total 12.50 EUR"}' \| minimal --agent node-extract -p - --output-format result` |
 
 Notes:
 

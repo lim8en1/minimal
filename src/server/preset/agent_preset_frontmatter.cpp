@@ -330,7 +330,7 @@ bool IsKnownKey(const std::string& key) {
         {"compression_prompt", 0}, {"compaction_strategy", 0},
         {"mode", 0},          {"disable", 0},       {"hidden", 0},
         {"color", 0},         {"steps", 0},         {"tool_config", 0},
-        {"plugin_permissions", 0}, {"parameters", 0},
+        {"plugin_permissions", 0}, {"parameters", 0}, {"tool_choice", 0},
     };
     return kKnown.count(key) != 0;
 }
@@ -593,6 +593,14 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
     if (const auto disable = OptionalBool(node, "disable")) result.disable = *disable;
     if (const auto hidden = OptionalBool(node, "hidden")) result.hidden = *hidden;
     result.color = OptionalString(node, "color");
+    if (const std::string choice = OptionalString(node, "tool_choice"); !choice.empty()) {
+        if (choice == "required") {
+            result.tool_choice_required = true;
+        } else if (choice != "auto") {
+            throw std::runtime_error("agent preset: tool_choice must be one of auto|required, got '" +
+                                     choice + "'");
+        }
+    }
     const YAML::Node steps = node["steps"];
     if (steps) {
         if (!steps.IsScalar() || steps.as<std::string>().find_first_not_of("0123456789") !=

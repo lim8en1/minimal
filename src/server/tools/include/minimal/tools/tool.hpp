@@ -34,6 +34,13 @@ struct ToolResult {
     // fallback a client shows when it has no renderer for the kind. Null =
     // absent. Self-contained: a renderer never parses content_text.
     nlohmann::json display = nullptr;
+    // Set = this call FINISHES THE TURN with a structured result: the round is
+    // answered and persisted as usual, then no provider call follows and the
+    // turn completes with StopReason::EndTurn carrying this value (wire:
+    // TurnCompletedEvent.result_json). Ignored on an error result. Core never
+    // interprets the value; the tool that sets it owns its shape (the node
+    // plugin's submit_result validates it against the preset's output schema).
+    std::optional<nlohmann::json> turn_result;
 };
 
 struct ToolContext {

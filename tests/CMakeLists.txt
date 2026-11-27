@@ -24,6 +24,7 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     compaction_trigger_test.cpp
     context_compactor_test.cpp
     structured_compaction_test.cpp
+    node_plugin_test.cpp
     bundled_assets_test.cpp
     examples_parse_test.cpp
     chat_request_bench.cpp
@@ -74,6 +75,10 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/plugins/server/skills/skills_model.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/skills/skills_preset.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/compaction-structured/structured_compaction.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/node/node_config.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/node/schema_cache.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/node/submit_result_tool.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/node/input_gate.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/project-context/project_context.cpp"
     skills_plugin_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/server/opencode-compat/opencode_providers.cpp"
@@ -530,6 +535,8 @@ target_link_libraries(minimal_tests PRIVATE
     # tools-search sources are compiled directly into the test binary (see the
     # sources list above), so RE2 comes with them -- same linkage as the plugin.
     minimal_re2
+    # node sources are compiled in too; the validator comes with them.
+    nlohmann_json_schema_validator::validator
     # memory sources are compiled directly into the test binary (see the
     # sources list above), same as every other bundled plugin's non-entry-
     # point sources; the sidecar backend spawns a plain python subprocess

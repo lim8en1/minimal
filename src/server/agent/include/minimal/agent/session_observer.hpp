@@ -12,8 +12,11 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "minimal/llm/chat.hpp"
 #include "minimal/llm/message.hpp"
@@ -55,6 +58,9 @@ struct TurnSummary {
     // above is then a lower bound, and a pricing observer must treat the turn
     // as unpriced rather than bill a partial count as if it were whole.
     bool turn_usage_fully_reported = true;
+    // The structured result a tool finished the turn with
+    // (tools::ToolResult::turn_result); nullopt when none did.
+    std::optional<nlohmann::json> turn_result;
 };
 
 // One provider round answered inside a still-running turn (AgentLoop fires it

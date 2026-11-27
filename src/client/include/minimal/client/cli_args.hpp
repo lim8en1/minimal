@@ -28,6 +28,10 @@ namespace minimal::client {
 
 struct HeadlessOptions {
     std::string prompt;
+    // `-p -`: the prompt is stdin, read to EOF when the run starts (parsing
+    // stays pure). `--print=-` is the literal text "-", the '=' form's usual
+    // "this really is text" meaning.
+    bool prompt_from_stdin = false;
     std::string server;  // already a gRPC target; empty means the default socket
     std::string agent_preset;
     // "<provider>/<model>", validated at parse so a typo fails before a server
@@ -43,6 +47,10 @@ struct HeadlessOptions {
     // session start; works on resume too (subscriptions never persist).
     std::vector<std::string> signals;
     bool jsonl = false;
+    // --output-format result: stdout carries ONLY the turn's structured result
+    // (TurnCompletedEvent.result_json) and a newline; a turn without one exits
+    // kNoResult. Diagnostics go to stderr.
+    bool result_only = false;
     // --output-format json: a machine-readable listing, valid only alongside
     // --list-sessions (a turn's output formats stay text|jsonl).
     bool list_json = false;

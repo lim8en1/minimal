@@ -111,6 +111,7 @@ inline const char* StopReasonName(llm::StopReason reason) {
         case llm::StopReason::Refusal: return "refusal";
         case llm::StopReason::Cancelled: return "cancelled";
         case llm::StopReason::Paused: return "paused";
+        case llm::StopReason::Rejected: return "rejected";
         case llm::StopReason::Unknown: return "unknown";
     }
     return "unknown";

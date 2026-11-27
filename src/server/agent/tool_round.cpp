@@ -27,6 +27,8 @@ ToolRound::Outcome ToolRound::Run(const std::vector<const llm::ToolUseBlock*>& t
         tools::PreparedInvocation prepared;
         tools::ToolContext ctx;
         bool to_pool = false;
+        // Written by whichever thread executes the call; read after Wait().
+        std::optional<nlohmann::json> turn_result;
     };
     std::vector<PendingCall> calls;
     calls.reserve(tool_uses.size());
@@ -245,7 +247,7 @@ ToolRound::Outcome ToolRound::Run(const std::vector<const llm::ToolUseBlock*>& t
                 InToolScope() { g_in_tool_execution = true; }
                 ~InToolScope() { g_in_tool_execution = false; }
             } in_tool;
-            tool_result = executor_.Execute(call.prepared, call.ctx);
+            tool_result = executor_.Execute(call.prepared, call.ctx, &call.turn_result);
         } catch (const std::exception& error) {
             // Execute never throws by contract (tool_executor.hpp) -- but
             // this is the one seam whose failure mode is std::terminate
@@ -335,7 +337,18 @@ ToolRound::Outcome ToolRound::Run(const std::vector<const llm::ToolUseBlock*>& t
     }
     pool_.Wait();
 
-    return Outcome{std::move(results), stop_requested};
+    // The FIRST turn result in block order wins -- the model's order, not
+    // completion order, so a round with two submissions is deterministic.
+    // The other calls already ran and are answered normally.
+    std::optional<nlohmann::json> turn_result;
+    for (auto& call : calls) {
+        if (call.turn_result) {
+            turn_result = std::move(call.turn_result);
+            break;
+        }
+    }
+
+    return Outcome{std::move(results), stop_requested, std::move(turn_result)};
 }
 
 }  // namespace minimal::agent

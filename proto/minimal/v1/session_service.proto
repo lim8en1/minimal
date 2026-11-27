@@ -438,6 +438,11 @@ message TurnCompletedEvent {
   // backend-reported count (some OpenAI-compatible proxies report zero
   // usage). Render it, don't price it.
   bool usage_estimated = 4;
+  // The structured result a tool finished the turn with (a tool's
+  // ToolResult::turn_result, e.g. the node plugin's submit_result), as one
+  // JSON document. Empty = the turn produced none. stop_reason is END_TURN
+  // whenever it is set.
+  string result_json = 5;
 }
 
 // Lifecycle of a BACKGROUND task -- work (background bash) whose process

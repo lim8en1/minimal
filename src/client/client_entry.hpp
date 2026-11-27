@@ -22,7 +22,11 @@ enum ExitCode {
     kPaused = 5,      // the session was paused mid-turn (unreachable from -p,
                       // which never sends SetPausedEvent -- mapped so a future
                       // caller cannot mistake suspension for success)
+    kNoResult = 6,    // --output-format result: the turn ended without a
+                      // structured result (TurnCompletedEvent.result_json)
     kUsage = 64,
+    kRejected = 65,   // EX_DATAERR: the prompt was vetoed (STOP_REASON_REJECTED)
+                      // -- a hook, or a turn gate such as a node input contract
     kUnavailable = 69,  // no server, or it refused the session
     kInternalError = 70,  // EX_SOFTWARE: an exception escaped somewhere it shouldn't have
 };

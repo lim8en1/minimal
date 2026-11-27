@@ -27,6 +27,7 @@
 
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
+#include "minimal/agent/turn_gate.hpp"
 #include "minimal/agent/permission_gate_service.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/agent/session_support.hpp"
@@ -382,6 +383,8 @@ static int RunServer(int argc, char** argv) {
     // once settings are parsed; asked per session by the SessionRegistry.
     minimal::agent::ContextContributorRegistry context_contributors(
         minimal::common::DefaultLogger());
+    // Additive across plugins: prompt vetoes at turn start (turn_gate.hpp).
+    minimal::agent::TurnGateRegistry turn_gates(minimal::common::DefaultLogger());
     // Additive across plugins: each may contribute one advisor keyed by its
     // name; permissions.json's "advisor" selects one. An empty registry is the
     // default -- every Ask reaches the human.
@@ -511,6 +514,7 @@ static int RunServer(int argc, char** argv) {
         .hooks = &hook_dispatcher,
         .provider_config = &provider_config_extensions,
         .preset_extensions = &preset_extensions,
+        .turn_gates = &turn_gates,
     };
     minimal::plugins::PluginLoader loader(registries, plugin_storage.get(),
                                           plugin_data_root);

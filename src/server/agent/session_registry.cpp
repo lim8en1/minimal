@@ -254,6 +254,7 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // (Phase 5 step 8): Session reads this LoopConfig, not a second copy on
     // SessionParams.
     if (loop_config.hooks == nullptr) loop_config.hooks = registries_.hooks;
+    if (loop_config.turn_gates == nullptr) loop_config.turn_gates = registries_.turn_gates;
 
     auto provider = resolver_.Acquire(preset);
 

@@ -80,6 +80,10 @@ enum StopReason {
   // transcript. Distinct from CANCELLED so the headless exit code and the
   // core.stop hook can tell "suspended, will continue" from "halted".
   STOP_REASON_PAUSED = 8;
+  // The turn's prompt was vetoed before anything ran or was persisted (a
+  // core.user_prompt_submit hook or a plugin turn gate, e.g. a node preset's
+  // input contract); an ErrorEvent carrying the reason precedes it.
+  STOP_REASON_REJECTED = 9;
 }
 
 message Usage {

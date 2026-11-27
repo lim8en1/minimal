@@ -555,6 +555,15 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             break;
         }
 
+        // A tool finished the turn with a structured result: the round is
+        // answered and persisted above, and that IS the turn's outcome --
+        // no provider call follows. EndTurn, because the model ended it.
+        if (round.turn_result) {
+            result.stop_reason = llm::StopReason::EndTurn;
+            result.turn_result = std::move(round.turn_result);
+            break;
+        }
+
         // Turn boundary: safe to splice in anything a background subagent
         // finished while this turn was running.
         FlushInjectedMessages();

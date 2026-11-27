@@ -415,6 +415,10 @@ find_package(re2 CONFIG REQUIRED)
 add_library(minimal_re2 INTERFACE)
 target_link_libraries(minimal_re2 INTERFACE re2::re2)
 
+# JSON Schema validation backs the node plugin's input/output contracts
+# (plugins/server/node). Built on nlohmann-json; linked into that plugin only.
+find_package(nlohmann_json_schema_validator CONFIG REQUIRED)
+
 if(MINIMAL_BUILD_CLIENT)
     find_package(ftxui CONFIG REQUIRED)
     find_package(md4c CONFIG REQUIRED)   # exports md4c::md4c (verified: vcpkg + brew agree)

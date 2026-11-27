@@ -606,7 +606,8 @@ std::function<bool(const std::filesystem::path&)> ToolExecutor::PathPermittedFor
 }
 
 llm::ToolResultBlock ToolExecutor::Execute(const PreparedInvocation& prepared,
-                                           ToolContext& ctx) {
+                                           ToolContext& ctx,
+                                           std::optional<nlohmann::json>* turn_result) {
     if (prepared.denial) {
         return *prepared.denial;
     }
@@ -666,6 +667,9 @@ llm::ToolResultBlock ToolExecutor::Execute(const PreparedInvocation& prepared,
         if (result.content_text.empty()) result.content_text = "(no output)";
         block.content.push_back(llm::TextBlock{std::move(result.content_text)});
         block.display = std::move(result.display);
+        if (turn_result != nullptr && !result.is_error && result.turn_result) {
+            *turn_result = std::move(result.turn_result);
+        }
         return block;
     } catch (const std::exception& error) {
         ctx.logger.warn("tool '{}' threw: {}", prepared.tool_name, error.what());

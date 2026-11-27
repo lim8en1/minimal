@@ -32,6 +32,7 @@ class CompactionStrategyRegistry;
 class ContextContributorRegistry;
 class MentionResolverRegistry;
 class PresetExtensionRegistry;
+class TurnGateRegistry;
 }  // namespace minimal::agent
 namespace minimal::rpc {
 class AuthProviderRegistry;
@@ -69,6 +70,8 @@ struct HostRegistries {
     config::ProviderConfigExtensions* provider_config = nullptr;
     // Per-preset tool definitions and system-prompt appendices (resolve time).
     agent::PresetExtensionRegistry* preset_extensions = nullptr;
+    // Prompt vetoes consulted at turn start (turn_gate.hpp).
+    agent::TurnGateRegistry* turn_gates = nullptr;
 };
 
 }  // namespace minimal::plugins
