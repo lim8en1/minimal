@@ -179,8 +179,11 @@ bool Child::Signal(int sig) {
         if (pid_.compare_exchange_strong(expected, -1)) ForgetPgid(pid);
         return false;
     }
-    killpg(pid, sig);
-    kill(pid, sig);  // the fork-to-setsid window, where the group does not exist yet
+    // The pid only as a fallback, for the fork-to-setsid window where the group
+    // does not exist yet. Not both: a child that handles the first copy before
+    // the second lands sees TWO signals -- a python interpreter reports the
+    // spare one as a second, idle interrupt.
+    if (killpg(pid, sig) != 0) kill(pid, sig);
     return true;
 }
 

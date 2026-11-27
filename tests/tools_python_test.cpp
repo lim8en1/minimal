@@ -81,7 +81,7 @@ private:
 // "session dead" and the reader would kill the interpreter instantly.
 const auto kLifetimeToken = std::make_shared<const int>(1);
 
-void WaitFor(const std::function<bool()>& predicate, std::chrono::seconds budget) {
+void WaitFor(const std::function<bool()>& predicate, std::chrono::milliseconds budget) {
     const auto deadline = std::chrono::steady_clock::now() + budget;
     while (!predicate()) {
         if (std::chrono::steady_clock::now() >= deadline) return;
@@ -617,16 +617,18 @@ TEST_CASE("input() parks until the stdin channel is fed, then the protocol survi
     REQUIRE(id3.has_value());
     // No fixed sleep can promise the driver has reached input(): under load
     // it may not have read the request yet, and an interrupt then is (rightly)
-    // spent as an idle one. Repeat until the request itself answers.
-    auto reaction = Interpreter::InterruptOutcome::kNoReaction;
-    for (int attempt = 0; attempt < 20 && reaction != Interpreter::InterruptOutcome::kResponse;
-         ++attempt) {
+    // spent as an idle one; one landing just before input()'s read() blocks
+    // is only noticed by the next signal (CPython runs handlers between
+    // bytecodes). Repeat until the request itself has failed -- its own
+    // result, not WaitForInterrupt's classification of whatever line came
+    // first, is what this test pins.
+    for (int attempt = 0; attempt < 20 && !killed->Has("KeyboardInterrupt"); ++attempt) {
         const auto baseline = interp->Progress();
         interp->SoftInterrupt();
-        reaction = interp->WaitForInterrupt(baseline, std::chrono::seconds(5), nullptr);
+        (void)interp->WaitForInterrupt(baseline, std::chrono::seconds(5), nullptr);
+        WaitFor([&] { return killed->Has("KeyboardInterrupt"); }, std::chrono::milliseconds(200));
     }
-    CHECK(reaction == Interpreter::InterruptOutcome::kResponse);
-    WaitFor([&] { return killed->Has("KeyboardInterrupt"); }, std::chrono::seconds(10));
+    CHECK(killed->Has("KeyboardInterrupt"));
     CHECK(interp->alive());
 }
 

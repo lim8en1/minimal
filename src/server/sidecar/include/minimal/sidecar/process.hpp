@@ -203,8 +203,8 @@ public:
         if (pid > 0) ForgetPgid(pid);
     }
 
-    // Sends `sig` to the child's process group (and the pid itself, which covers
-    // the fork-to-setsid window when the group does not exist yet) -- but only
+    // Sends `sig` to the child's process group (or, when the group does not exist
+    // yet -- the fork-to-setsid window -- to the pid itself) -- but only
     // while the child is still ours: a waitpid(WNOHANG) recheck first, so a child
     // that already exited is reaped and released here instead of signalled.
     // False when there was nothing to signal. Best-effort against a CONCURRENT
